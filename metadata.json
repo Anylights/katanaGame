@@ -1,0 +1,6 @@
+{
+  "name": "影之武士",
+  "description": "2D side-scrolling action slash game '影之武士' (Shadow Samurai) inspired by Katana Zero. Features fluid sword combat, bullet deflection, bullet-time (slow-motion), blood sprays, and screen shake with procedural audio.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
