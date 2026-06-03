@@ -136,14 +136,14 @@ export default function App() {
         width: e.type === 'boss' ? 70 : (e.type === 'shield' ? 24 : (e.type === 'shotgunner' ? 22 : 18)),
         height: e.type === 'boss' ? 95 : 38,
         direction: 'left',
-        health: e.type === 'boss' ? 40 : (e.type === 'shield' ? 2 : (e.type === 'shotgunner' ? 2 : 1)),
-        maxHealth: e.type === 'boss' ? 40 : (e.type === 'shield' ? 2 : (e.type === 'shotgunner' ? 2 : 1)),
+        health: e.type === 'boss' ? 50 : (e.type === 'shield' ? 2 : (e.type === 'shotgunner' ? 2 : 1)),
+        maxHealth: e.type === 'boss' ? 50 : (e.type === 'shield' ? 2 : (e.type === 'shotgunner' ? 2 : 1)),
         state: e.type === 'boss' ? 'alert' : 'patrol',
         patrolMinX: e.x - (e.patrolRange || 0),
         patrolMaxX: e.x + (e.patrolRange || 0),
         shootCooldown: e.type === 'shotgunner' ? Math.random() * 60 + 30 : (Math.random() * 60 + 15),
         attackCooldown: 0,
-        noticeTimer: e.type === 'boss' ? (loopRestart ? 0 : 180) : 0, // Bypass dramatic entrance on retry!
+        noticeTimer: e.type === 'boss' ? (loopRestart ? 0 : 540) : 0, // Bypass dramatic entrance on retry!
         alertExclamationTimer: 0,
         deathTimer: 0,
         bloodDecalsCreated: false,
@@ -604,6 +604,9 @@ export default function App() {
             e.y = 230; // Direct active landing coordinates
           }
         });
+        state.player.x = 800 - state.player.width / 2;
+        state.player.y = 512;
+        state.player.isGrounded = true;
         state.camera.shake = 15 * settings.screenShakeMultiplier;
         AudioSynth.playDeflect();
       }
@@ -996,26 +999,39 @@ export default function App() {
             b.startY = b.y;
             
             // Aim deflected bullet:
-            // 1. Locate closest active enemy to target auto-snipe bounce!
+            // 1. Locate the enemy that fired it (ownerId) if alive, otherwise find closest live enemy!
             let targetEnemy: EnemyState | null = null;
-            let minDist = Infinity;
-            state.enemies.forEach(e => {
-              if (e.state !== 'dead') {
-                const ed = Math.hypot(e.x - b.x, e.y - b.y);
-                if (ed < minDist) {
-                  minDist = ed;
-                  targetEnemy = e;
-                }
+            if (b.ownerId) {
+              const creator = state.enemies.find(e => e.id === b.ownerId && e.health > 0 && e.state !== 'dead');
+              if (creator) {
+                targetEnemy = creator;
               }
-            });
+            }
+            if (!targetEnemy) {
+              let minDist = Infinity;
+              state.enemies.forEach(e => {
+                if (e.health > 0 && e.state !== 'dead') {
+                  const ed = Math.hypot(e.x - b.x, e.y - b.y);
+                  if (ed < minDist) {
+                    minDist = ed;
+                    targetEnemy = e;
+                  }
+                }
+              });
+            }
 
             if (targetEnemy) {
-              // Direct sniper reflection towards enemy target!
-              const dx = (targetEnemy as EnemyState).x + 9 - b.x;
-              const dy = (targetEnemy as EnemyState).y + 19 - b.y;
+              // Direct sniper reflection straight towards target center!
+              const dx = (targetEnemy as EnemyState).x + (targetEnemy as EnemyState).width / 2 - b.x;
+              const dy = (targetEnemy as EnemyState).y + (targetEnemy as EnemyState).height / 2 - b.y;
               const mag = Math.hypot(dx, dy);
-              b.vx = (dx / mag) * 32;
-              b.vy = (dy / mag) * 32;
+              if (mag > 0) {
+                b.vx = (dx / mag) * 32;
+                b.vy = (dy / mag) * 32;
+              } else {
+                b.vx = 32;
+                b.vy = 0;
+              }
             } else {
               // Standard straight recoil backwards fast
               b.vx = -b.vx * 1.5;
@@ -1141,14 +1157,27 @@ export default function App() {
       // Check bullet enemy damage hits (Only from deflected bullets)
       if (!bulletDied && b.isDeflected) {
         for (const enemy of state.enemies) {
-          if (enemy.health > 0) {
+          if (enemy.health > 0 && enemy.state !== 'dead') {
             const eCenterX = enemy.x + enemy.width / 2;
             const eCenterY = enemy.y + enemy.height / 2;
             const distToEnemy = Math.hypot(b.x - eCenterX, b.y - eCenterY);
 
-            if (distToEnemy <= 18) {
+            // Check bounding box first because it's the target geometry of the enemy!
+            const hitByBox = (
+              b.x >= enemy.x - 2 &&
+              b.x <= enemy.x + enemy.width + 2 &&
+              b.y >= enemy.y - 2 &&
+              b.y <= enemy.y + enemy.height + 2
+            );
+
+            // Dynamically scale radius based on enemy dimensions
+            const radiusScale = Math.max(enemy.width, enemy.height) / 2 + 5;
+
+            if (hitByBox || distToEnemy <= radiusScale) {
               bulletDied = true;
-              damageEnemy(enemy, 1, Math.atan2(b.vy, b.vx));
+              // Slightly reduce deflected bullet damage for Boss
+              const damageAmount = enemy.type === 'boss' ? 0.3 : 1;
+              damageEnemy(enemy, damageAmount, Math.atan2(b.vy, b.vx));
               break;
             }
           }
@@ -1164,6 +1193,9 @@ export default function App() {
 
     // 8. ENEMY INTELLIGENT BEHAVIOR & SHOOT AI
     for (const enemy of state.enemies) {
+      if (enemy.iframeTimer && enemy.iframeTimer > 0) {
+        enemy.iframeTimer = Math.max(0, enemy.iframeTimer - dt);
+      }
       if (enemy.health <= 0) {
         // Increment fall gravity for organic dead drops on platform floors
         enemy.vy += 0.35 * dt;
@@ -1182,47 +1214,227 @@ export default function App() {
         // Boss behaves differently: hovers/flies smoothly without gravity!
         if (enemy.noticeTimer > 0) {
           enemy.noticeTimer -= dt; // Tick down noticeTimer for dramatic intro!
-          // Smooth landing from sky
-          const introProgress = Math.max(0, Math.min(1, 1 - (enemy.noticeTimer / 180)));
-          enemy.x = 800 - enemy.width / 2;
-          enemy.y = -150 + 380 * introProgress;
-          enemy.vx = 0;
-          enemy.vy = 0;
-          
-          // Gorgeous intro portal storm particles!
-          if (Math.random() < 0.35) {
-            state.particles.push({
-              x: enemy.x + Math.random() * enemy.width,
-              y: enemy.y + Math.random() * enemy.height,
-              vx: (Math.random() - 0.5) * 8,
-              vy: (Math.random() + 0.2) * 5,
-              color: '#22d3ee',
-              size: Math.random() * 4 + 1.5,
-              alpha: 0.9,
-              decay: 0.05,
-              gravity: 0.05,
-              dampening: 0.95,
-              type: 'spark'
-            });
-          }
-          if (enemy.noticeTimer <= 2) {
-            // Intro ending smash trigger shockwaves!
-            state.camera.shake = 25 * settings.screenShakeMultiplier;
-            AudioSynth.playDeflect(); // play massive deflect splash sound
-            for (let k = 0; k < 25; k++) {
+          const t = enemy.noticeTimer;
+
+          // Override player coordinates to simulate descent falling camera!
+          if (t > 360) {
+            // Player is falling from sky smoothly!
+            // Starts at y = -350 and lands at exactly y = 512 at t = 360
+            const progress = (540 - t) / 180; // 0.0 to 1.0 progress
+            state.player.x = 800 - state.player.width / 2;
+            state.player.y = -350 + (512 - -350) * progress;
+            state.player.vx = 0;
+            state.player.vy = 0;
+            state.player.isGrounded = false;
+            
+            // Lock camera centered exactly on player!
+            state.camera.x = state.player.x - 480;
+            state.camera.y = state.player.y - 270;
+            
+            // Boss is completely hidden or off-screen
+            enemy.x = 800 - enemy.width / 2;
+            enemy.y = -500;
+            enemy.vx = 0;
+            enemy.vy = 0;
+
+            // Faint hum vibration shake
+            state.camera.shake = Math.max(state.camera.shake, 1.2 * settings.screenShakeMultiplier);
+          } else if (t > 260) {
+            // Right at t = 360, player slam lands!
+            state.player.x = 800 - state.player.width / 2;
+            state.player.y = 512;
+            state.player.vx = 0;
+            state.player.vy = 0;
+            state.player.isGrounded = true;
+
+            // Boss coordinates are offscreen/hidden
+            enemy.x = 800 - enemy.width / 2;
+            enemy.y = -500;
+            enemy.vx = 0;
+            enemy.vy = 0;
+
+            // Camera is centered on player ground level
+            state.camera.x = state.player.x - 480;
+            state.camera.y = state.player.y - 270;
+
+            // Heavy screen shake and sound right when landing hits
+            if (t > 356) {
+              state.camera.shake = Math.max(state.camera.shake, 28 * settings.screenShakeMultiplier);
+            } else {
+              state.camera.shake = Math.max(state.camera.shake, 1.5 * settings.screenShakeMultiplier);
+            }
+
+            // Trigger landing CLANG sound once!
+            if (!enemy.playedLandingSound) {
+              enemy.playedLandingSound = true;
+              AudioSynth.playDeflect(); // CLANG chime sound
+              AudioSynth.playKill(); // Deep rumble explosion sound
+              
+              // Big particle explosion shockwave when player lands
               state.particles.push({
-                x: enemy.x + enemy.width / 2,
-                y: enemy.y + enemy.height - 10,
-                vx: (Math.random() - 0.5) * 12,
-                vy: -Math.random() * 8,
-                color: '#ec4899',
-                size: Math.random() * 5 + 2,
-                alpha: 1,
+                x: 800,
+                y: 540,
+                vx: 0, vy: 0,
+                color: '#ffffff',
+                size: 60, alpha: 1, decay: 0.015, gravity: 0, dampening: 1, type: 'shockwave'
+              });
+              for (let k = 0; k < 30; k++) {
+                state.particles.push({
+                  x: 800,
+                  y: 535,
+                  vx: (Math.random() - 0.5) * 14,
+                  vy: -Math.random() * 6 - 2,
+                  color: '#22d3ee',
+                  size: Math.random() * 4 + 2,
+                  alpha: 1,
+                  decay: 0.02,
+                  gravity: 0.15,
+                  dampening: 0.98,
+                  type: 'spark'
+                });
+              }
+            }
+          } else if (t > 180) {
+            // Stage 3: Singularity black hole wakes up!
+            state.player.x = 800 - state.player.width / 2;
+            state.player.y = 512;
+            state.player.vx = 0;
+            state.player.vy = 0;
+            state.player.isGrounded = true;
+
+            enemy.x = 800 - enemy.width / 2;
+            enemy.y = -500;
+
+            state.camera.x = state.player.x - 480;
+            state.camera.y = state.player.y - 270;
+
+            // Trigger black hole activation CLANG chime once!
+            if (!enemy.playedBlackHoleSound) {
+              enemy.playedBlackHoleSound = true;
+              AudioSynth.playDeflect();
+              AudioSynth.playKill();
+              
+              state.camera.shake = Math.max(state.camera.shake, 35 * settings.screenShakeMultiplier);
+              
+              // Spatial shockwave centered at the black hole coordinate
+              state.particles.push({
+                x: 480, // Center of screen background rift
+                y: 180,
+                vx: 0, vy: 0,
+                color: 'rgba(244, 63, 94, 0.85)',
+                size: 85, alpha: 1, decay: 0.012, gravity: 0, dampening: 1, type: 'shockwave'
+              });
+              for (let k = 0; k < 35; k++) {
+                const angle = Math.random() * Math.PI * 2;
+                state.particles.push({
+                  x: 480,
+                  y: 180,
+                  vx: Math.cos(angle) * (3 + Math.random() * 5),
+                  vy: Math.sin(angle) * (3 + Math.random() * 5),
+                  color: '#ec4899',
+                  size: Math.random() * 3.5 + 2,
+                  alpha: 1,
+                  decay: 0.018,
+                  gravity: 0,
+                  dampening: 0.98,
+                  type: 'spark'
+                });
+              }
+            }
+          } else {
+            // Stage 4: Red Alert & Boss descends slowly!
+            state.player.x = 800 - state.player.width / 2;
+            state.player.y = 512;
+            state.player.vx = 0;
+            state.player.vy = 0;
+            state.player.isGrounded = true;
+
+            state.camera.x = state.player.x - 480;
+            state.camera.y = state.player.y - 270;
+
+            // Boss descends slowly from -150 to hover height of 160 as t goes from 180 to 60
+            const enterProgress = Math.max(0, Math.min(1.0, (180 - t) / 120));
+            enemy.x = 800 - enemy.width / 2;
+            enemy.y = -150 + 310 * enterProgress; // smoothly reaches 160 hover point!
+            enemy.vx = 0;
+            enemy.vy = 0;
+
+            state.camera.shake = Math.max(state.camera.shake, (3 + Math.sin(t * 0.1) * 1.5) * settings.screenShakeMultiplier);
+
+            // Swirling sparks into boss core
+            if (Math.random() < 0.65) {
+              const angle = Math.random() * Math.PI * 2;
+              const dist = 90 + Math.random() * 140;
+              const targetX = enemy.x + enemy.width / 2;
+              const targetY = enemy.y + enemy.height / 2;
+              state.particles.push({
+                x: targetX + Math.cos(angle) * dist,
+                y: targetY + Math.sin(angle) * dist,
+                vx: -Math.cos(angle) * (5 + Math.random() * 5),
+                vy: -Math.sin(angle) * (5 + Math.random() * 5),
+                color: Math.random() < 0.35 ? '#f43f5e' : (Math.random() < 0.5 ? '#eab308' : '#22d3ee'),
+                size: Math.random() * 3.5 + 2,
+                alpha: 0.95,
                 decay: 0.02,
-                gravity: 0.12,
+                gravity: 0,
+                dampening: 0.96,
+                type: 'spark'
+              });
+            }
+
+            // Local electrical arcs springing off boss shield plates
+            if (Math.random() < 0.25) {
+              state.particles.push({
+                x: enemy.x + Math.random() * enemy.width,
+                y: enemy.y + Math.random() * enemy.height,
+                vx: (Math.random() - 0.5) * 8,
+                vy: (Math.random() + 0.2) * 5,
+                color: '#22d3ee',
+                size: Math.random() * 4 + 1.5,
+                alpha: 0.9,
+                decay: 0.05,
+                gravity: 0.05,
                 dampening: 0.95,
                 type: 'spark'
               });
+            }
+
+            // Smash touchdown explosive final blast when noticeTimer hits 1 or 2!
+            if (t <= 2 && !enemy.playedLandingBlast) {
+              enemy.playedLandingBlast = true;
+              state.camera.shake = 35 * settings.screenShakeMultiplier;
+              AudioSynth.playDeflect();
+
+              state.particles.push({
+                x: enemy.x + enemy.width / 2,
+                y: enemy.y + enemy.height - 10,
+                vx: 0, vy: 0,
+                color: 'rgba(34, 211, 238, 0.9)',
+                size: 50, alpha: 1, decay: 0.02, gravity: 0, dampening: 1, type: 'shockwave'
+              });
+              state.particles.push({
+                x: enemy.x + enemy.width / 2,
+                y: enemy.y + enemy.height - 10,
+                vx: 0, vy: 0,
+                color: 'rgba(244, 63, 94, 0.9)',
+                size: 30, alpha: 1, decay: 0.025, gravity: 0, dampening: 1, type: 'shockwave'
+              });
+              
+              for (let k = 0; k < 45; k++) {
+                state.particles.push({
+                  x: enemy.x + enemy.width / 2,
+                  y: enemy.y + enemy.height - 10,
+                  vx: (Math.random() - 0.5) * 16,
+                  vy: -Math.random() * 11,
+                  color: Math.random() < 0.5 ? '#22d3ee' : '#ec4899',
+                  size: Math.random() * 5.5 + 2,
+                  alpha: 1,
+                  decay: 0.02,
+                  gravity: 0.12,
+                  dampening: 0.95,
+                  type: 'spark'
+                });
+              }
             }
           }
         } else {
@@ -1233,40 +1445,164 @@ export default function App() {
             enemy.bossAttackCount = 0;
           }
           
-          enemy.bossStateTimer -= dt;
-          
-          if (enemy.bossStateTimer <= 0) {
-            // Select next active state in cycle
-            const BOSS_ATTACKS = ['reposition', 'attack_gatling', 'reposition', 'attack_burst', 'reposition', 'attack_sweep_laser'];
-            enemy.bossAttackCount = (enemy.bossAttackCount || 0) + 1;
-            const nextState = BOSS_ATTACKS[enemy.bossAttackCount % BOSS_ATTACKS.length];
-            enemy.bossState = nextState;
+          if (enemy.bossSecondPhaseTriggerTimer && enemy.bossSecondPhaseTriggerTimer > 0) {
+            enemy.bossSecondPhaseTriggerTimer -= dt;
             
-            if (nextState === 'reposition') {
-              const spots = [
-                { x: 180, y: 160 },
-                { x: 350, y: 180 },
-                { x: 750, y: 140 },
-                { x: 1100, y: 180 },
-                { x: 1350, y: 160 }
-              ];
-              // Pick a spot reasonably far away from current position
-              let chosen = spots[Math.floor(Math.random() * spots.length)];
-              if (Math.abs(enemy.x - chosen.x) < 180) {
-                chosen = spots[(spots.indexOf(chosen) + 2) % spots.length];
+            // Lock in position, hover smoothly near center of the arena during power surge
+            enemy.vx = (480 - enemy.x) * 0.08 * dt;
+            enemy.vy = (180 - enemy.y) * 0.08 * dt;
+            enemy.x += enemy.vx;
+            enemy.y += enemy.vy;
+            
+            // Constantly shake screen for a massive power-up rumble!
+            state.camera.shake = Math.max(state.camera.shake, 16 * settings.screenShakeMultiplier);
+            
+            // Swirling particles vortex converging on core
+            for (let v = 0; v < 3; v++) {
+              const ang = Math.random() * Math.PI * 2;
+              const dist = 70 + Math.random() * 110;
+              const cx = enemy.x + enemy.width / 2;
+              const cy = enemy.y + 45;
+              state.particles.push({
+                x: cx + Math.cos(ang) * dist,
+                y: cy + Math.sin(ang) * dist,
+                vx: -Math.cos(ang) * (4 + Math.random() * 4),
+                vy: -Math.sin(ang) * (4 + Math.random() * 4),
+                color: Math.random() < 0.55 ? '#ff2525' : '#fbbf24', // Red / golden sparks
+                size: Math.random() * 4.5 + 2,
+                alpha: 0.95,
+                decay: 0.03,
+                gravity: 0,
+                dampening: 0.98,
+                type: 'spark'
+              });
+            }
+            
+            enemy.iframeTimer = 2; // Invincible during phase transition countdown!
+            
+            if (enemy.bossSecondPhaseTriggerTimer <= 0) {
+              // DETONATE POWER-UP SURVEY DETONATION SHOCKWAVE!
+              const cx = enemy.x + enemy.width / 2;
+              const cy = enemy.y + 45;
+              AudioSynth.playDeflect();
+              state.camera.shake = 35 * settings.screenShakeMultiplier;
+              
+              // Multi-layered beautiful particles explosion
+              state.particles.push({
+                x: cx,
+                y: cy,
+                vx: 0, vy: 0,
+                color: 'rgba(239, 68, 68, 0.95)',
+                size: 35, alpha: 1, decay: 0.02, gravity: 0, dampening: 1, type: 'shockwave'
+              });
+              state.particles.push({
+                x: cx,
+                y: cy,
+                vx: 0, vy: 0,
+                color: 'rgba(245, 158, 11, 0.95)',
+                size: 20, alpha: 1, decay: 0.03, gravity: 0, dampening: 1, type: 'shockwave'
+              });
+              
+              for (let k = 0; k < 45; k++) {
+                const spd = 3 + Math.random() * 12;
+                const spdAngle = Math.random() * Math.PI * 2;
+                state.particles.push({
+                  x: cx,
+                  y: cy,
+                  vx: Math.cos(spdAngle) * spd,
+                  vy: Math.sin(spdAngle) * spd,
+                  color: Math.random() < 0.6 ? '#f43f5e' : '#f59e0b',
+                  size: Math.random() * 4 + 1.8,
+                  alpha: 0.95,
+                  decay: 0.035,
+                  gravity: 0.08,
+                  dampening: 0.95,
+                  type: 'spark'
+                });
               }
-              enemy.bossTargetX = chosen.x;
-              enemy.bossTargetY = chosen.y;
-              enemy.bossStateTimer = 75; // frames to fly
-            } else if (nextState === 'attack_gatling') {
-              enemy.bossStateTimer = 140; // 140 ticks of continuous fire
-            } else if (nextState === 'attack_burst') {
-              enemy.bossStateTimer = 70; // 40 energy gathering, 30 burst trigger release
-            } else if (nextState === 'attack_sweep_laser') {
-              enemy.bossStateTimer = 110; // Red indicator laser sweep
-            } else {
-              enemy.bossState = 'idle';
-              enemy.bossStateTimer = 60;
+              
+              enemy.bossState = 'reposition';
+              enemy.bossStateTimer = 40; // reposition quickly!
+              enemy.bossTargetX = (state.camera ? state.camera.x : 320) + 480;
+              enemy.bossTargetY = 160;
+            }
+          } else {
+            // Normal state logic / aggressive selection in Phase 2
+            enemy.bossStateTimer -= dt;
+            
+            if (enemy.bossStateTimer <= 0) {
+              // Select next active state matching difficulty!
+              const BOSS_ATTACKS = enemy.isBossSecondPhase
+                ? ['reposition', 'attack_super_gatling', 'reposition', 'attack_omega_burst', 'reposition', 'attack_air_strike_bombardment', 'reposition', 'attack_hyper_laser']
+                : ['reposition', 'attack_gatling', 'reposition', 'attack_burst', 'reposition', 'attack_sweep_laser'];
+              
+              enemy.bossAttackCount = (enemy.bossAttackCount || 0) + 1;
+              const nextState = BOSS_ATTACKS[enemy.bossAttackCount % BOSS_ATTACKS.length];
+              enemy.bossState = nextState;
+              
+              if (nextState === 'reposition') {
+                const camX = state.camera ? state.camera.x : 320;
+                const spots = [
+                  { x: camX + 160, y: 155 },
+                  { x: camX + 320, y: 185 },
+                  { x: camX + 480, y: 135 },
+                  { x: camX + 640, y: 185 },
+                  { x: camX + 800, y: 155 }
+                ].map(spot => ({
+                  x: Math.max(100, Math.min(1500, spot.x)),
+                  y: Math.max(90, Math.min(230, spot.y))
+                }));
+                
+                // Fast reposition glide speeds in Phase 2!
+                let chosen = spots[Math.floor(Math.random() * spots.length)];
+                if (Math.abs(enemy.x - chosen.x) < 150) {
+                  chosen = spots[(spots.indexOf(chosen) + 2) % spots.length];
+                }
+                enemy.bossTargetX = chosen.x;
+                enemy.bossTargetY = chosen.y;
+                enemy.bossStateTimer = enemy.isBossSecondPhase ? 45 : 75; // Fly much faster!
+              } else if (nextState === 'attack_gatling' || nextState === 'attack_super_gatling') {
+                enemy.bossStateTimer = nextState === 'attack_super_gatling' ? 150 : 140;
+              } else if (nextState === 'attack_burst' || nextState === 'attack_omega_burst') {
+                enemy.bossStateTimer = nextState === 'attack_omega_burst' ? 85 : 70;
+              } else if (nextState === 'attack_sweep_laser' || nextState === 'attack_hyper_laser') {
+                enemy.bossStateTimer = nextState === 'attack_hyper_laser' ? 115 : 110;
+              } else if (nextState === 'attack_air_strike_bombardment') {
+                enemy.bossStateTimer = 110; // Air strikes timers
+                state.camera.shake = 18 * settings.screenShakeMultiplier;
+                AudioSynth.playDeflect();
+                
+                enemy.bossReds = [];
+                const px = player.x;
+                const py = player.y;
+                
+                // Initialize 6 staggered bombardment warning coordinates
+                for (let bIdx = 0; bIdx < 6; bIdx++) {
+                  let tx = px + (Math.random() - 0.5) * 220;
+                  let ty = py + (Math.random() - 0.5) * 120;
+                  
+                  if (bIdx > 1) {
+                    tx = 150 + Math.random() * 1200;
+                    ty = 150 + Math.random() * 340; // map height bounds check
+                  }
+                  
+                  // Cap positions inside floor coordinates boundaries
+                  tx = Math.max(100, Math.min(1450, tx));
+                  ty = Math.max(80, Math.min(520, ty));
+                  
+                  enemy.bossReds!.push({
+                    x: tx,
+                    y: ty,
+                    r: 75,
+                    timer: 50 + bIdx * 12, // Staggered explosion frames countdown
+                    maxTimer: 50 + bIdx * 12,
+                    triggeredDamage: false
+                  });
+                }
+              } else {
+                enemy.bossState = 'idle';
+                enemy.bossStateTimer = 60;
+              }
             }
           }
           
@@ -1274,8 +1610,10 @@ export default function App() {
           if (enemy.bossState === 'reposition') {
             const tx = enemy.bossTargetX || 800;
             const ty = enemy.bossTargetY || 200;
-            enemy.vx = (tx - enemy.x) * 0.08 * dt;
-            enemy.vy = (ty - enemy.y) * 0.08 * dt;
+            // Float faster in Phase 2!
+            const glideCoeff = enemy.isBossSecondPhase ? 0.12 : 0.08;
+            enemy.vx = (tx - enemy.x) * glideCoeff * dt;
+            enemy.vy = (ty - enemy.y) * glideCoeff * dt;
             enemy.x += enemy.vx;
             enemy.y += enemy.vy;
             
@@ -1286,7 +1624,7 @@ export default function App() {
                 y: enemy.y + enemy.height - 10,
                 vx: -enemy.vx * 0.5 + (Math.random() - 0.5) * 3,
                 vy: 2 + Math.random() * 4,
-                color: '#ec4899',
+                color: enemy.isBossSecondPhase ? '#f43f5e' : '#ec4899', // Crimson in phase 2!
                 size: Math.random() * 3 + 1,
                 alpha: 0.95,
                 decay: 0.04,
@@ -1295,6 +1633,10 @@ export default function App() {
                 type: 'spark'
               });
             }
+          } else if (enemy.bossState === 'phase2_transition') {
+            // Static hover in position
+            enemy.vx = 0;
+            enemy.vy = 0;
           } else {
             // Hover bobbing smoothly in place
             enemy.vx = 0;
@@ -1489,44 +1831,67 @@ export default function App() {
             enemy.direction = isFacingRight ? 'right' : 'left';
             
             // Execute boss attacks based on current bossState!
-            if (enemy.bossState === 'attack_gatling') {
+            if (enemy.bossState === 'attack_gatling' || enemy.bossState === 'attack_super_gatling') {
+              const isSuper = enemy.bossState === 'attack_super_gatling';
               if (enemy.bossShootTimer === undefined) {
                 enemy.bossShootTimer = 0;
               }
               enemy.bossShootTimer -= dt;
               if (enemy.bossShootTimer <= 0) {
-                enemy.bossShootTimer = 6; // fire every 6 ticks!
+                enemy.bossShootTimer = isSuper ? 3 : 6; // Fire twice as fast in Phase 2 overdrive!
                 
-                // Fire single-targeted bullet splayed slightly
-                const shootAngle = Math.atan2(dyToPlayer + 15, dxToPlayer) + (Math.random() - 0.5) * 0.15;
-                const bSpeed = 11.5;
+                const bSpeed = isSuper ? 13.5 : 11.5;
                 const bulletX = enemy.x + (enemy.direction === 'right' ? 55 : 15);
                 const bulletY = enemy.y + 40;
                 
-                state.bullets.push({
-                  id: `boss_gatling_${Date.now()}_${Math.random()}`,
-                  x: bulletX,
-                  y: bulletY,
-                  vx: Math.cos(shootAngle) * bSpeed,
-                  vy: Math.sin(shootAngle) * bSpeed,
-                  radius: 5,
-                  isDeflected: false,
-                  ownerId: enemy.id,
-                  startX: bulletX,
-                  startY: bulletY
-                });
+                if (isSuper) {
+                  // Dual fast splayed bullets
+                  const baseAngle = Math.atan2(dyToPlayer + 15, dxToPlayer);
+                  const angles = [baseAngle - 0.08, baseAngle + 0.08];
+                  angles.forEach((shootAngle) => {
+                    state.bullets.push({
+                      id: `boss_super_gatling_${Date.now()}_${Math.random()}`,
+                      x: bulletX,
+                      y: bulletY,
+                      vx: Math.cos(shootAngle) * bSpeed,
+                      vy: Math.sin(shootAngle) * bSpeed,
+                      radius: 5.5,
+                      isDeflected: false,
+                      ownerId: enemy.id,
+                      startX: bulletX,
+                      startY: bulletY
+                    });
+                  });
+                } else {
+                  // Single moderately fast bullet
+                  const shootAngle = Math.atan2(dyToPlayer + 15, dxToPlayer) + (Math.random() - 0.5) * 0.15;
+                  state.bullets.push({
+                    id: `boss_gatling_${Date.now()}_${Math.random()}`,
+                    x: bulletX,
+                    y: bulletY,
+                    vx: Math.cos(shootAngle) * bSpeed,
+                    vy: Math.sin(shootAngle) * bSpeed,
+                    radius: 5,
+                    isDeflected: false,
+                    ownerId: enemy.id,
+                    startX: bulletX,
+                    startY: bulletY
+                  });
+                }
                 
                 // Sparks of cannon fire
-                for (let f = 0; f < 3; f++) {
+                const numSparks = isSuper ? 5 : 3;
+                for (let f = 0; f < numSparks; f++) {
+                  const shootAngle = Math.atan2(dyToPlayer + 15, dxToPlayer);
                   state.particles.push({
                     x: bulletX,
                     y: bulletY,
-                    vx: Math.cos(shootAngle) * (4 + Math.random() * 4),
-                    vy: Math.sin(shootAngle) * (Math.random() - 0.5) * 4,
-                    color: '#ff3366',
-                    size: Math.random() * 3.5 + 1.5,
+                    vx: Math.cos(shootAngle) * (isSuper ? 6 : 4 + Math.random() * 4),
+                    vy: Math.sin(shootAngle) * (Math.random() - 0.5) * (isSuper ? 5 : 4),
+                    color: isSuper ? '#f43f5e' : '#ff3366',
+                    size: Math.random() * (isSuper ? 4 : 3.5) + 1.5,
                     alpha: 0.95,
-                    decay: 0.1,
+                    decay: isSuper ? 0.08 : 0.1,
                     gravity: 0,
                     dampening: 0.9,
                     type: 'spark'
@@ -1534,21 +1899,23 @@ export default function App() {
                 }
                 AudioSynth.playBulletFired();
               }
-            } else if (enemy.bossState === 'attack_burst') {
+            } else if (enemy.bossState === 'attack_burst' || enemy.bossState === 'attack_omega_burst') {
+              const isOmega = enemy.bossState === 'attack_omega_burst';
               // Gathering indicator sparkles: converging onto boss core reactor!
               if (enemy.bossStateTimer > 25) {
-                if (Math.random() < 0.45) {
+                const particleChance = isOmega ? 0.65 : 0.45;
+                if (Math.random() < particleChance) {
                   const angle = Math.random() * Math.PI * 2;
-                  const rad = 50 + Math.random() * 100;
+                  const rad = (isOmega ? 70 : 50) + Math.random() * (isOmega ? 150 : 100);
                   const cx = enemy.x + enemy.width / 2;
                   const cy = enemy.y + 40;
                   state.particles.push({
                     x: cx + Math.cos(angle) * rad,
                     y: cy + Math.sin(angle) * rad,
-                    vx: -Math.cos(angle) * 3,
-                    vy: -Math.sin(angle) * 3,
-                    color: '#22d3ee', // energetic cyan sparks
-                    size: Math.random() * 4 + 2,
+                    vx: -Math.cos(angle) * (isOmega ? 4.5 : 3),
+                    vy: -Math.sin(angle) * (isOmega ? 4.5 : 3),
+                    color: isOmega ? (Math.random() < 0.4 ? '#ef4444' : '#d946ef') : '#22d3ee',
+                    size: Math.random() * (isOmega ? 4.5 : 4) + 2,
                     alpha: 0.95,
                     decay: 0.03,
                     gravity: 0,
@@ -1557,32 +1924,56 @@ export default function App() {
                   });
                 }
               } else if (enemy.bossStateTimer <= 25 && enemy.bossStateTimer > 0) {
-                // Radial Cross Burst Trigger!
+                // Burst Trigger!
                 if (enemy.bossBurstTriggered === undefined || enemy.bossBurstTriggered <= 0) {
                   enemy.bossBurstTriggered = 1; // trigger once
                   
-                  // Release circular ring of bullet orbs
                   const cx = enemy.x + enemy.width / 2;
                   const cy = enemy.y + 40;
                   AudioSynth.playDeflect(); // loud metal chime sound
-                  state.camera.shake = 16 * settings.screenShakeMultiplier;
+                  state.camera.shake = (isOmega ? 22 : 16) * settings.screenShakeMultiplier;
                   
-                  const numProjectiles = 14;
-                  for (let i = 0; i < numProjectiles; i++) {
-                    const angle = (i / numProjectiles) * Math.PI * 2;
+                  if (isOmega) {
+                    // Release multi-layered staggered bullet hell patterns
+                    const numProjectiles = 18;
+                    for (let ring = 0; ring < 2; ring++) {
+                      const ringSpeed = ring === 0 ? 6.5 : 8.5;
+                      const offsetAngle = ring === 0 ? 0 : (Math.PI / numProjectiles);
+                      for (let i = 0; i < numProjectiles; i++) {
+                        const angle = (i / numProjectiles) * Math.PI * 2 + offsetAngle;
+                        state.bullets.push({
+                          id: `boss_omega_burst_${Date.now()}_ring${ring}_b_${i}_${Math.random()}`,
+                          x: cx,
+                          y: cy,
+                          vx: Math.cos(angle) * ringSpeed,
+                          vy: Math.sin(angle) * ringSpeed,
+                          radius: 5.5,
+                          isDeflected: false,
+                          ownerId: enemy.id,
+                          startX: cx,
+                          startY: cy
+                        });
+                      }
+                    }
+                  } else {
+                    // Standard single circular radial ring
+                    const numProjectiles = 14;
                     const bSpeed = 7.5;
-                    state.bullets.push({
-                      id: `boss_burst_${Date.now()}_b_${i}_${Math.random()}`,
-                      x: cx,
-                      y: cy,
-                      vx: Math.cos(angle) * bSpeed,
-                      vy: Math.sin(angle) * bSpeed,
-                      radius: 5,
-                      isDeflected: false,
-                      ownerId: enemy.id,
-                      startX: cx,
-                      startY: cy
-                    });
+                    for (let i = 0; i < numProjectiles; i++) {
+                      const angle = (i / numProjectiles) * Math.PI * 2;
+                      state.bullets.push({
+                        id: `boss_burst_${Date.now()}_b_${i}_${Math.random()}`,
+                        x: cx,
+                        y: cy,
+                        vx: Math.cos(angle) * bSpeed,
+                        vy: Math.sin(angle) * bSpeed,
+                        radius: 5,
+                        isDeflected: false,
+                        ownerId: enemy.id,
+                        startX: cx,
+                        startY: cy
+                      });
+                    }
                   }
                   
                   // Flash visual shockwave effect
@@ -1591,10 +1982,10 @@ export default function App() {
                     y: cy,
                     vx: 0,
                     vy: 0,
-                    color: 'rgba(236, 72, 153, 0.95)',
-                    size: 15,
+                    color: isOmega ? 'rgba(217, 70, 239, 0.95)' : 'rgba(236, 72, 153, 0.95)',
+                    size: isOmega ? 22 : 15,
                     alpha: 1,
-                    decay: 0.03,
+                    decay: isOmega ? 0.025 : 0.03,
                     gravity: 0,
                     dampening: 1,
                     type: 'shockwave'
@@ -1603,23 +1994,34 @@ export default function App() {
               } else {
                 enemy.bossBurstTriggered = 0; // reset
               }
-            } else if (enemy.bossState === 'attack_sweep_laser') {
-              // Devastating sweep laser action!
+            } else if (enemy.bossState === 'attack_sweep_laser' || enemy.bossState === 'attack_hyper_laser') {
+              const isHyper = enemy.bossState === 'attack_hyper_laser';
               const mx = enemy.x + enemy.width / 2;
               const my = enemy.y + 40;
               
-              const sweepProgress = (110 - enemy.bossStateTimer) / 110; // 0 to 1 progress
+              const totalDuration = isHyper ? 120 : 110;
+              const warningLimit = isHyper ? 85 : 80;
+              const sweepProgress = (totalDuration - enemy.bossStateTimer) / totalDuration; // 0 to 1 progress
+              
               let targetX = 0;
-              if (enemy.direction === 'right') {
-                targetX = 180 + sweepProgress * 1300; // Sweep left to right across floor
+              if (isHyper) {
+                if (enemy.direction === 'right') {
+                  targetX = 120 + sweepProgress * 1400; // Sweep left all the way to right floor
+                } else {
+                  targetX = 1530 - sweepProgress * 1400; // Sweep right all the way to left floor
+                }
               } else {
-                targetX = 1450 - sweepProgress * 1300; // Sweep right to left across floor
+                if (enemy.direction === 'right') {
+                  targetX = 180 + sweepProgress * 1300; // Sweep left to right across floor
+                } else {
+                  targetX = 1450 - sweepProgress * 1300; // Sweep right to left across floor
+                }
               }
               
-              if (enemy.bossStateTimer > 80) {
+              if (enemy.bossStateTimer > warningLimit) {
                 // Warmup warning tracking sight line
                 enemy.bossLaserTargetX = targetX;
-              } else if (enemy.bossStateTimer <= 80 && enemy.bossStateTimer > 10) {
+              } else if (enemy.bossStateTimer <= warningLimit && enemy.bossStateTimer > 10) {
                 // ACTIVE incineration laser active!
                 enemy.bossLaserTargetX = targetX;
                 
@@ -1638,31 +2040,109 @@ export default function App() {
                   const projY = my + t * ldy;
                   const dist = Math.hypot(px - projX, py - projY);
                   
-                  if (dist < 25 && !player.isDead && !player.isDashing) {
-                    // Trigger death instantly
-                    triggerPlayerDeath('Incinerated by Chronos Thermobaric Beam.');
+                  const hitDistThreshold = isHyper ? 45 : 25; // Much wider beam check for GIGA hyper laser!
+                  if (dist < hitDistThreshold && !player.isDead && !player.isDashing) {
+                    triggerPlayerDeath(isHyper ? 'Incinerated by Chronos GIGA-OBLITERATOR Laser.' : 'Incinerated by Chronos Thermobaric Beam.');
                   }
                 }
                 
                 // Spawn boiling particles on floor hit contact
-                if (Math.random() < 0.6) {
-                  state.camera.shake = 1.2 * settings.screenShakeMultiplier;
-                  for (let f = 0; f < 3; f++) {
+                const randChance = isHyper ? 0.9 : 0.6;
+                if (Math.random() < randChance) {
+                  state.camera.shake = (isHyper ? 2.5 : 1.2) * settings.screenShakeMultiplier;
+                  const numLaserParticles = isHyper ? 5 : 3;
+                  for (let f = 0; f < numLaserParticles; f++) {
                     state.particles.push({
                       x: targetX,
                       y: 550,
-                      vx: (Math.random() - 0.5) * 8,
-                      vy: -Math.random() * 8,
-                      color: Math.random() < 0.5 ? '#f43f5e' : '#eab308',
-                      size: Math.random() * 5 + 1.5,
+                      vx: (Math.random() - 0.5) * (isHyper ? 12 : 8),
+                      vy: -Math.random() * (isHyper ? 12 : 8),
+                      color: Math.random() < 0.4 ? '#f43f5e' : (Math.random() < 0.5 ? '#eab308' : '#ffffff'),
+                      size: Math.random() * (isHyper ? 6.5 : 5) + 1.5,
                       alpha: 0.95,
-                      decay: 0.05,
-                      gravity: 0.08,
+                      decay: isHyper ? 0.04 : 0.05,
+                      gravity: isHyper ? 0.09 : 0.08,
                       dampening: 0.95,
                       type: 'spark'
                     });
                   }
                 }
+              }
+            } else if (enemy.bossState === 'attack_air_strike_bombardment') {
+              // Red target zones and flame explosions handling
+              if (enemy.bossReds) {
+                enemy.bossReds.forEach((red) => {
+                  if (red.timer > 0) {
+                    red.timer -= dt;
+                    
+                    // Sucking in dust warnings!
+                    if (Math.random() < 0.25) {
+                      const ang = Math.random() * Math.PI * 2;
+                      const rad = red.r * (red.timer / red.maxTimer + 0.3);
+                      state.particles.push({
+                        x: red.x + Math.cos(ang) * rad,
+                        y: red.y + Math.sin(ang) * rad,
+                        vx: -Math.cos(ang) * 2,
+                        vy: -Math.sin(ang) * 2,
+                        color: '#f43f5e',
+                        size: 2,
+                        alpha: 0.8,
+                        decay: 0.05,
+                        gravity: 0,
+                        dampening: 1,
+                        type: 'spark'
+                      });
+                    }
+                    
+                    if (red.timer <= 0 && !red.triggeredDamage) {
+                      red.triggeredDamage = true;
+                      
+                      AudioSynth.playDeflect();
+                      state.camera.shake = Math.max(state.camera.shake, 20 * settings.screenShakeMultiplier);
+                      
+                      // Explode particles!
+                      for (let k = 0; k < 20; k++) {
+                        const esAngle = Math.random() * Math.PI * 2;
+                        const esSpeed = 2 + Math.random() * 12;
+                        state.particles.push({
+                          x: red.x,
+                          y: red.y,
+                          vx: Math.cos(esAngle) * esSpeed,
+                          vy: Math.sin(esAngle) * esSpeed,
+                          color: Math.random() < 0.65 ? '#ef4444' : '#f59e0b',
+                          size: Math.random() * 6 + 3,
+                          alpha: 1.0,
+                          decay: 0.025,
+                          gravity: (Math.random() - 0.5) * 0.1,
+                          dampening: 0.93,
+                          type: 'spark'
+                        });
+                      }
+                      
+                      // Shockwave expands
+                      state.particles.push({
+                        x: red.x,
+                        y: red.y,
+                        vx: 0, vy: 0,
+                        color: 'rgba(239, 68, 68, 0.9)',
+                        size: red.r * 1.5,
+                        alpha: 1,
+                        decay: 0.04,
+                        gravity: 0,
+                        dampening: 1,
+                        type: 'shockwave'
+                      });
+                      
+                      // Damage collision: If player is inside horizontal & vertical ranges of explosion column or radius
+                      const px = player.x + player.width / 2;
+                      const py = player.y + player.height / 2;
+                      const distToPlayer = Math.hypot(px - red.x, py - red.y);
+                      if (distToPlayer <= red.r + 5 && !player.isDead && !player.isDashing) {
+                        triggerPlayerDeath('Incinerated by Chronos Orbital Thermobaric Bombardment.');
+                      }
+                    }
+                  }
+                });
               }
             }
           } else if (enemy.type === 'grunt' || enemy.type === 'shield') {
@@ -1757,13 +2237,15 @@ export default function App() {
                   // Slice from behind! Fatal damage!
                   if (!player.slashedEnemyIds) player.slashedEnemyIds = {};
                   player.slashedEnemyIds[enemy.id] = true;
-                  damageEnemy(enemy, 1, player.slashAngle);
+                  const slashDamage = enemy.type === 'boss' ? 3.0 : 1;
+                  damageEnemy(enemy, slashDamage, player.slashAngle);
                 }
               } else {
                 // Instantly cut down!
                 if (!player.slashedEnemyIds) player.slashedEnemyIds = {};
                 player.slashedEnemyIds[enemy.id] = true;
-                damageEnemy(enemy, 1, player.slashAngle);
+                const slashDamage = enemy.type === 'boss' ? 3.0 : 1;
+                damageEnemy(enemy, slashDamage, player.slashAngle);
               }
             }
           }
@@ -2082,8 +2564,24 @@ export default function App() {
   }
 
   function damageEnemy(enemy: EnemyState, amount: number, hitAngle: number) {
+    if (enemy.iframeTimer && enemy.iframeTimer > 0) {
+      return;
+    }
     enemy.health -= amount;
+    enemy.iframeTimer = 16; // Provide a robust 16 physics ticks immunity frame so same-slash multi-hits are filtered!
+
     const state = playStateRef.current;
+
+    // Real time state transition trigger when boss drops to half health or lower
+    if (enemy.type === 'boss' && enemy.health > 0) {
+      if (enemy.health <= enemy.maxHealth / 2 && !enemy.isBossSecondPhase) {
+        enemy.isBossSecondPhase = true;
+        enemy.bossSecondPhaseTriggerTimer = 120; // 120 ticks spectacular overdrive charge sequence
+        enemy.bossState = 'phase2_transition';
+        state.camera.shake = 30 * settings.screenShakeMultiplier;
+        AudioSynth.playDeflect();
+      }
+    }
 
     state.camera.freezeTimeRemaining = settings.hitstopDurationMs + 20; // Extra visceral freeze on slaughter!
     state.camera.shake = 14 * settings.screenShakeMultiplier;
@@ -2236,9 +2734,38 @@ export default function App() {
     drawCyberpunkParallaxBackground(ctx, state.camera.x, state.camera.y, shakeX, shakeY);
     ctx.restore();
 
+    const bossEntity = state.enemies.find(e => e.type === 'boss');
+    const isCinematicIntro = currentLevelIndex === 15 && bossEntity && bossEntity.noticeTimer > 0;
+    
+    let fgAlpha = 1.0;
+    if (isCinematicIntro) {
+      const t = bossEntity.noticeTimer;
+      if (t > 360) {
+        fgAlpha = 0.0;
+      } else if (t > 260) {
+        const wakeProgress = (360 - t) / 100;
+        fgAlpha = Math.min(1.0, wakeProgress / 0.45);
+      } else {
+        fgAlpha = 1.0;
+      }
+    }
+
     ctx.save();
-    // Apply Screen Shake with camera coordinates translations for foreground
-    ctx.translate(-state.camera.x + shakeX, -state.camera.y + shakeY);
+    if (isCinematicIntro && bossEntity.noticeTimer > 360) {
+      // Stage 1 zoom close-up focus on the falling player!
+      const t = bossEntity.noticeTimer;
+      const progress = Math.max(0, Math.min(1, (540 - t) / 180));
+      const zoom = 2.3 - 1.3 * progress; // smooth zoom from 2.3 down to 1.0
+      ctx.translate(480 + shakeX, 270 + shakeY);
+      ctx.scale(zoom, zoom);
+      ctx.translate(-state.player.x - 9, -state.player.y - 19);
+    } else {
+      // Apply standard Screen Shake and camera coordinates translations
+      ctx.translate(-state.camera.x + shakeX, -state.camera.y + shakeY);
+    }
+
+    ctx.save();
+    ctx.globalAlpha = fgAlpha;
 
     // Draw cyber grid lines background as subtle overlay on floors/walls
     drawCyberGridLines(ctx, activeLevel.width, activeLevel.height);
@@ -2346,6 +2873,8 @@ export default function App() {
       }
     });
 
+    ctx.restore();
+
     // Draw Decaying and Spark Particle Effects
     state.particles.forEach(p => {
       ctx.save();
@@ -2439,19 +2968,21 @@ export default function App() {
 
       // Render custom boss laser beams
       if (enemy.type === 'boss' && enemy.health > 0 && enemy.noticeTimer <= 0) {
-        if (enemy.bossState === 'attack_sweep_laser') {
+        if (enemy.bossState === 'attack_sweep_laser' || enemy.bossState === 'attack_hyper_laser') {
+          const isHyper = enemy.bossState === 'attack_hyper_laser';
           const mx = enemy.x + enemy.width / 2;
           const my = enemy.y + 40;
           const targetX = enemy.bossLaserTargetX || mx;
           const targetY = 550; // ground level Y line
+          const warningLimit = isHyper ? 85 : 80;
           
-          if (enemy.bossStateTimer > 80) {
+          if (enemy.bossStateTimer > warningLimit) {
             // Render warning aiming indicator line (dashed red laser)
             ctx.save();
-            ctx.shadowColor = '#ef4444';
-            ctx.shadowBlur = 10;
-            ctx.strokeStyle = '#ef4444';
-            ctx.lineWidth = 1.8;
+            ctx.shadowColor = isHyper ? '#f43f5e' : '#ef4444';
+            ctx.shadowBlur = isHyper ? 18 : 10;
+            ctx.strokeStyle = isHyper ? '#f43f5e' : '#ef4444';
+            ctx.lineWidth = isHyper ? 3.5 : 1.8;
             ctx.setLineDash([5, 8]);
             ctx.beginPath();
             ctx.moveTo(mx, my);
@@ -2460,20 +2991,20 @@ export default function App() {
             ctx.setLineDash([]);
             
             // Draw targeting warning text
-            ctx.font = 'bold 9px monospace';
-            ctx.fillStyle = '#ef4444';
+            ctx.font = isHyper ? 'bold 11px monospace' : 'bold 9px monospace';
+            ctx.fillStyle = isHyper ? '#f43f5e' : '#ef4444';
             ctx.textAlign = 'center';
-            ctx.fillText("⚠️ CRITICAL THERMOBARIC SCANNING ⚠️", targetX, targetY - 15);
+            ctx.fillText(isHyper ? "⚠️ WARNING: GIGA-OBLITERATOR OVERDRIVE CHARGE ⚠️" : "⚠️ CRITICAL THERMOBARIC SCANNING ⚠️", targetX, targetY - 18);
             ctx.restore();
-          } else if (enemy.bossStateTimer <= 80 && enemy.bossStateTimer > 10) {
+          } else if (enemy.bossStateTimer <= warningLimit && enemy.bossStateTimer > 10) {
             // Drawing the massive active plasma beam!
             ctx.save();
             
             // Outer thick pink glow
-            ctx.shadowColor = '#ec4899';
-            ctx.shadowBlur = 24;
-            ctx.strokeStyle = '#ec4899';
-            ctx.lineWidth = 15 + Math.sin(state.currentTick * 0.8) * 4;
+            ctx.shadowColor = isHyper ? '#f43f5e' : '#ec4899';
+            ctx.shadowBlur = isHyper ? 40 : 24;
+            ctx.strokeStyle = isHyper ? '#ef4444' : '#ec4899';
+            ctx.lineWidth = (isHyper ? 40 : 15) + Math.sin(state.currentTick * 0.8) * (isHyper ? 10 : 4);
             ctx.beginPath();
             ctx.moveTo(mx, my);
             ctx.lineTo(targetX, targetY);
@@ -2482,7 +3013,7 @@ export default function App() {
             // Inner superheated white core
             ctx.shadowBlur = 0;
             ctx.strokeStyle = '#ffffff';
-            ctx.lineWidth = 6 + Math.sin(state.currentTick * 0.8) * 1.5;
+            ctx.lineWidth = (isHyper ? 16 : 6) + Math.sin(state.currentTick * 0.8) * (isHyper ? 4 : 1.5);
             ctx.beginPath();
             ctx.moveTo(mx, my);
             ctx.lineTo(targetX, targetY);
@@ -2490,6 +3021,61 @@ export default function App() {
             
             ctx.restore();
           }
+        }
+        
+        // Draw active red bombardment warning circles & fire columns for boss!
+        if (enemy.bossReds) {
+          enemy.bossReds.forEach((red) => {
+            if (red.timer > 0) {
+              ctx.save();
+              // Outer warning circle
+              ctx.strokeStyle = '#f43f5e';
+              ctx.lineWidth = 2;
+              ctx.shadowColor = '#f43f5e';
+              ctx.shadowBlur = 8;
+              ctx.fillStyle = 'rgba(244, 63, 94, 0.1)';
+              ctx.beginPath();
+              ctx.arc(red.x, red.y, red.r, 0, Math.PI * 2);
+              ctx.fill();
+              ctx.stroke();
+              
+              // Shrinking inner warning ring to indicate time to blast!
+              const progress = Math.max(0, red.timer / red.maxTimer);
+              ctx.strokeStyle = '#f59e0b'; // Gold
+              ctx.lineWidth = 1.5;
+              ctx.beginPath();
+              ctx.arc(red.x, red.y, red.r * progress, 0, Math.PI * 2);
+              ctx.stroke();
+              
+              // Pulsing exclamation in the center
+              ctx.font = 'bold 12px monospace';
+              ctx.fillStyle = '#f43f5e';
+              ctx.textAlign = 'center';
+              ctx.shadowBlur = 0;
+              ctx.fillText("⚠️", red.x, red.y + 4);
+              ctx.restore();
+            } else if (red.timer <= 0 && red.timer > -15) {
+              // EXPLOSION COLUMN / FIRE BLAST DRAWING State for 15 ticks!
+              const alpha = Math.max(0, 1 - (Math.abs(red.timer) / 15));
+              
+              ctx.save();
+              ctx.shadowColor = '#ef4444';
+              ctx.shadowBlur = 30 * alpha;
+              
+              // Draw a giant blazing pillar going all the way up through the screen!
+              const grad = ctx.createLinearGradient(red.x - red.r * alpha, 0, red.x + red.r * alpha, 0);
+              grad.addColorStop(0, `rgba(239, 68, 68, 0)`);
+              grad.addColorStop(0.3, `rgba(239, 68, 68, ${alpha * 0.85})`);
+              grad.addColorStop(0.5, `rgba(255, 255, 255, ${alpha * 0.95})`);
+              grad.addColorStop(0.7, `rgba(245, 158, 11, ${alpha * 0.85})`);
+              grad.addColorStop(1, `rgba(245, 158, 11, 0)`);
+              
+              ctx.fillStyle = grad;
+              ctx.fillRect(red.x - red.r * alpha * 1.3, 0, red.r * alpha * 2.6, 550);
+              
+              ctx.restore();
+            }
+          });
         }
       }
     });
@@ -3324,6 +3910,35 @@ export default function App() {
     shakeY: number
   ) {
     const levelIndex = currentLevelIndex;
+    const state = playStateRef.current;
+    const boss = state?.enemies?.find(e => e.type === 'boss');
+    const introActive = levelIndex === 15 && boss && boss.noticeTimer > 0;
+    const t = introActive ? boss.noticeTimer : 0;
+
+    if (introActive && t > 360) {
+      // Stage 1: Absolute pitch black sky and void space around the falling player!
+      ctx.fillStyle = '#010103';
+      ctx.fillRect(0, 0, 960, 540);
+      return;
+    }
+
+    let wakeProgress = 1.0;
+    let alphaSkyAndGears = 1.0;
+    let alphaSkyscrapers = 1.0;
+    let alphaFrontSkyscrapers = 1.0;
+
+    if (introActive && t <= 360 && t > 260) {
+      wakeProgress = (360 - t) / 100; // 0 to 1 progress
+      
+      // Far Layer (Sky, Stars, Celestial Orb, Gears) fades in from 0.65 to 1.0
+      alphaSkyAndGears = Math.max(0.0, Math.min(1.0, (wakeProgress - 0.65) / 0.35));
+      
+      // Mid Layer (Medium/Far structures, Flying Cars) fades in from 0.35 to 0.75
+      alphaSkyscrapers = Math.max(0.0, Math.min(1.0, (wakeProgress - 0.35) / 0.40));
+      
+      // Near Layer (Front high-density skyline layer) fades in from 0.0 to 0.45
+      alphaFrontSkyscrapers = Math.max(0.0, Math.min(1.0, wakeProgress / 0.45));
+    }
     
     // Determine active theme based on active level config or manual settings override
     let activeTheme = activeLevel.theme || 'cyber_neon';
@@ -3336,6 +3951,10 @@ export default function App() {
     }
     
     const preset = THEME_PRESETS[activeTheme] || THEME_PRESETS.cyber_neon;
+
+    // Save for far layer opacity controls
+    ctx.save();
+    ctx.globalAlpha = alphaSkyAndGears;
 
     // Draw Sky Gradient
     const skyGrad = ctx.createLinearGradient(0, 0, 0, 540);
@@ -3414,10 +4033,11 @@ export default function App() {
       ctx.restore();
 
       // --- STUNNING COLOSSAL TEMPORAL SINGULARITY RIFT ---
-      const rx = 480 - (camX - 320) * 0.12 + shakeX * 0.4;
-      const ry = 180 - camY * 0.04 + shakeY * 0.4;
+      if (!introActive || t <= 260) {
+        const rx = 480 - (camX - 320) * 0.12 + shakeX * 0.4;
+        const ry = 180 - camY * 0.04 + shakeY * 0.4;
 
-      // 1. Black outer event horizon glow
+        // 1. Black outer event horizon glow
       ctx.save();
       const outerGlow = ctx.createRadialGradient(rx, ry, 10, rx, ry, 210);
       outerGlow.addColorStop(0, 'rgba(244, 63, 94, 0.45)'); // Hot crimson
@@ -3517,6 +4137,7 @@ export default function App() {
       ctx.fill();
       ctx.stroke();
       ctx.restore();
+      }
     } else {
       // Draw Celestial Orb (Sun/Moon/Eclipse)
       ctx.save();
@@ -3587,12 +4208,16 @@ export default function App() {
       const isBlinking = hash(s * 91.4) > 0.6;
       const pulse = isBlinking ? (Math.sin(Date.now() / 250 + s) * 0.5 + 0.5) : 1;
       
-      ctx.globalAlpha = pulse * 0.7;
+      ctx.globalAlpha = (pulse * 0.7) * alphaSkyAndGears;
       ctx.fillRect(Math.floor(starX), Math.floor(starY), starSize, starSize);
     }
     ctx.restore();
 
+    ctx.restore(); // Complete Far layer opacity
+
     // Distant Far structures
+    ctx.save();
+    ctx.globalAlpha = alphaSkyAndGears;
     drawSkyscraperLayer(ctx, {
       parallaxFactor: 0.08,
       buildingWidth: 65,
@@ -3609,8 +4234,11 @@ export default function App() {
       windowColor: preset.windowColor1,
       drawAntennas: true
     });
+    ctx.restore();
 
     // Medium distant structures
+    ctx.save();
+    ctx.globalAlpha = alphaSkyscrapers;
     drawSkyscraperLayer(ctx, {
       parallaxFactor: 0.25,
       buildingWidth: 100,
@@ -3628,11 +4256,17 @@ export default function App() {
       drawAntennas: true,
       drawWires: true
     });
+    ctx.restore();
 
     // Draw flying vehicle streams
+    ctx.save();
+    ctx.globalAlpha = alphaSkyscrapers;
     drawFlyingCarTraffic(ctx, camX, camY, shakeX, shakeY, levelIndex);
+    ctx.restore();
 
     // Front high-density skyline layer
+    ctx.save();
+    ctx.globalAlpha = alphaFrontSkyscrapers;
     drawSkyscraperLayer(ctx, {
       parallaxFactor: 0.48,
       buildingWidth: 160,
@@ -3651,6 +4285,7 @@ export default function App() {
       drawAds: true,
       drawWires: true
     });
+    ctx.restore();
 
     // Specific rain/ember animation layers
     if (activeTheme === 'cyber_neon' && levelIndex === 3) {
@@ -4508,78 +5143,189 @@ export default function App() {
 
     if (boss.health > 0) {
       if (boss.noticeTimer > 0) {
-        // --- DRAW INTRO CINEMATIC CARD OVERLAY ---
+        // --- DRAW INTRO CINEMATIC OVERLAYS ---
         ctx.save();
         
+        const t = boss.noticeTimer;
+
+        // Custom falling dust streaks during player descent (t > 360)
+        if (t > 360) {
+          ctx.save();
+          ctx.strokeStyle = 'rgba(255, 255, 255, 0.28)';
+          ctx.lineWidth = 1;
+          for (let i = 0; i < 15; i++) {
+            const streakX = hash(i * 12.3) * 960;
+            const streakYMin = hash(i * 35.1) * 540;
+            const length = 50 + hash(i * 92.4) * 100;
+            const speed = 15;
+            // Draw lines streaming upwards rapidly (since player is falling down)
+            const curY = (streakYMin - (Date.now() * 0.15 * speed) % 540 + 540) % 540;
+            ctx.beginPath();
+            ctx.moveTo(streakX, curY);
+            ctx.lineTo(streakX, curY + length);
+            ctx.stroke();
+          }
+          ctx.restore();
+        }
+
+        // Full-screen theatrical scanning dark overlay
+        ctx.fillStyle = 'rgba(2, 2, 8, 0.25)';
+        ctx.fillRect(0, 0, 960, 540);
+        
+        // Cyberpunk style letterbar dividing lines with cyan glowing borders
+        ctx.strokeStyle = 'rgba(34, 211, 238, 0.35)';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(0, 48); ctx.lineTo(960, 48);
+        ctx.moveTo(0, 492); ctx.lineTo(960, 492);
+        ctx.stroke();
+        
+        // Neon Cockpit HUD Corner brackets for scanning aesthetics
+        ctx.strokeStyle = '#f43f5e';
+        ctx.lineWidth = 3;
+        // Top-Left
+        ctx.beginPath(); ctx.moveTo(25, 80); ctx.lineTo(25, 60); ctx.lineTo(45, 60); ctx.stroke();
+        // Top-Right
+        ctx.beginPath(); ctx.moveTo(935, 80); ctx.lineTo(935, 60); ctx.lineTo(915, 60); ctx.stroke();
+        // Bottom-Left
+        ctx.beginPath(); ctx.moveTo(25, 460); ctx.lineTo(25, 480); ctx.lineTo(45, 480); ctx.stroke();
+        // Bottom-Right
+        ctx.beginPath(); ctx.moveTo(935, 460); ctx.lineTo(935, 480); ctx.lineTo(915, 480); ctx.stroke();
+        
+        // Falling Matrix Code Stream cascades on both sides of the screen
+        ctx.save();
+        ctx.fillStyle = 'rgba(34, 211, 238, 0.22)';
+        ctx.font = 'bold 8.5px monospace';
+        const msPulse = Math.floor(Date.now() / 60);
+        
+        // Left column streams
+        for (let col = 15; col < 185; col += 20) {
+          const colTimer = (msPulse + col * 4.5) % 520;
+          for (let rowIdx = 0; rowIdx < 5; rowIdx++) {
+            const charY = (colTimer + rowIdx * 12) % 480 + 30;
+            if (charY > 58 && charY < 482) {
+              const sym = Math.random() < 0.5 ? "0" : "1";
+              ctx.fillText(sym, col, charY);
+            }
+          }
+        }
+        
+        // Right column streams
+        for (let col = 775; col < 945; col += 20) {
+          const colTimer = (msPulse + (col - 700) * 5.2) % 520;
+          for (let rowIdx = 0; rowIdx < 5; rowIdx++) {
+            const charY = (colTimer + rowIdx * 12) % 480 + 30;
+            if (charY > 58 && charY < 482) {
+              const sym = Math.random() < 0.5 ? "0" : "1";
+              ctx.fillText(sym, col, charY);
+            }
+          }
+        }
+        ctx.restore();
+        
+        // Red flashing alert color overlay during Stage 4
+        if (t <= 180) {
+          const redPulse = (Math.sin(t * 0.1) * 0.5 + 0.5) * 0.28;
+          ctx.fillStyle = `rgba(244, 63, 94, ${redPulse})`;
+          ctx.fillRect(0, 0, 960, 540);
+        }
+
+        // White/Cyan flash effects
+        if (t <= 360 && t > 325) {
+          const flashProgress = (360 - t) / 35;
+          const flashAlpha = Math.max(0, 1.0 - flashProgress);
+          ctx.fillStyle = `rgba(255, 255, 255, ${flashAlpha})`;
+          ctx.fillRect(0, 0, 960, 540);
+        } else if (t <= 260 && t > 225) {
+          const flashProgress = (260 - t) / 35;
+          const flashAlpha = Math.max(0, 1.0 - flashProgress);
+          ctx.fillStyle = `rgba(200, 245, 255, ${flashAlpha})`;
+          ctx.fillRect(0, 0, 960, 540);
+        }
+
         // Letterbox bars
         ctx.fillStyle = '#020205';
         ctx.fillRect(0, 0, 960, 48); // Top bar
         ctx.fillRect(0, 492, 960, 48); // Bottom bar
+
+        // Top bar text titles
+        ctx.fillStyle = '#ef4444';
+        ctx.font = 'bold 11px "JetBrains Mono", monospace';
+        ctx.textAlign = 'center';
+        if (t > 360) {
+          ctx.fillText("📡 PILOT INITIAL DESCENT STATUS DETECTED...", 480, 28);
+        } else if (t > 260) {
+          ctx.fillText("🚨 WARNING: ANOMALOUS SECTOR LIGHTNING DISCHARGE ACTIVATED 🚨", 480, 28);
+        } else if (t > 180) {
+          ctx.fillText("⚡ DANGER: CHRONOS SINGULARITY FORCEFIELD IN OPERATION ⚡", 480, 28);
+        } else {
+          ctx.fillStyle = Math.random() < 0.3 ? '#f43f5e' : '#ffffff';
+          ctx.fillText("⚠️ IMMEDIATE THREAT: COLLOSSAL MECH-DEMON ARRIVING ⚠️", 480, 28);
+        }
+
+        // Display beautiful bottom letterbox text instructions or alerts
+        if (t <= 180) {
+          ctx.textAlign = 'center';
+          ctx.fillStyle = '#ef4444';
+          ctx.font = 'bold 12px "JetBrains Mono", monospace';
+          ctx.fillText("WARNING: EXTREME SPATIAL WARPING IMMINENT", 480, 514);
+        } else {
+          ctx.textAlign = 'center';
+          ctx.fillStyle = '#64748b';
+          ctx.font = 'normal 10px "JetBrains Mono", monospace';
+          ctx.fillText("PRESS J, SPACE, OR LEFT-CLICK TO ESCAPE LEVEL COMMENCEMENT SEQUENCE", 480, 514);
+        }
+
+        ctx.restore();
+      } else if (boss.bossSecondPhaseTriggerTimer && boss.bossSecondPhaseTriggerTimer > 0) {
+        // --- DRAW SECOND PHASE OVERDRIVE TRANSITION ALARM ---
+        ctx.save();
         
-        // Center card overlay
-        ctx.fillStyle = 'rgba(10, 5, 20, 0.85)';
+        // Full screen subtle red glow letterbox
+        ctx.fillStyle = 'rgba(12, 1, 3, 0.45)';
+        ctx.fillRect(0, 0, 960, 540);
+        
+        ctx.fillStyle = 'rgba(18, 4, 8, 0.92)';
         ctx.strokeStyle = '#f43f5e';
-        ctx.lineWidth = 1.5;
+        ctx.lineWidth = 2.5;
         
-        const widthBox = 560;
-        const heightBox = 160;
-        const boxX = 480 - widthBox / 2;
-        const boxY = 270 - heightBox / 2;
+        const wBox = 580;
+        const hBox = 160;
+        const bx = 480 - wBox / 2;
+        const by = 270 - hBox / 2;
         
-        ctx.fillRect(boxX, boxY, widthBox, heightBox);
-        ctx.strokeRect(boxX, boxY, widthBox, heightBox);
+        ctx.fillRect(bx, by, wBox, hBox);
+        ctx.strokeRect(bx, by, wBox, hBox);
         
-        // Glowing alert stripes background
-        ctx.fillStyle = 'rgba(244, 63, 94, 0.08)';
-        for (let sX = boxX + 15; sX < boxX + widthBox - 15; sX += 30) {
+        // Neon red stripes warning pattern
+        ctx.fillStyle = 'rgba(239, 68, 68, 0.12)';
+        const stripOffset = Math.floor(Date.now() / 35) % 30;
+        for (let sX = bx - 15 + stripOffset; sX < bx + wBox; sX += 30) {
           ctx.beginPath();
-          ctx.moveTo(sX, boxY + 10);
-          ctx.lineTo(sX + 15, boxY + 10);
-          ctx.lineTo(sX + 30, boxY + heightBox - 10);
-          ctx.lineTo(sX + 15, boxY + heightBox - 10);
+          ctx.moveTo(sX, by + 10);
+          ctx.lineTo(sX + 12, by + 10);
+          ctx.lineTo(sX + 22, by + hBox - 10);
+          ctx.lineTo(sX + 10, by + hBox - 10);
           ctx.closePath();
           ctx.fill();
         }
         
-        ctx.shadowBlur = 12;
+        ctx.shadowBlur = 18;
         ctx.textAlign = 'center';
         
-        // Line 1: Warn banner
         ctx.shadowColor = '#f43f5e';
         ctx.font = 'bold 11px monospace';
-        ctx.fillStyle = '#f43f5e';
-        ctx.fillText("⚠️ WARNING: CHRONOS TIME ANOMALY DETECTED ⚠️", 480, boxY + 36);
+        ctx.fillStyle = '#ef4444';
+        ctx.fillText("⚠️ SYSTEM ERROR: CHRONOS OVERLOAD PROTECTION SHUNTED ⚠️", 480, by + 36);
         
-        // Line 2: Heavy title
-        ctx.shadowColor = '#38bdf8';
         ctx.font = '900 22px sans-serif';
-        ctx.fillStyle = '#f1f5f9';
-        ctx.fillText("PROJECT CHRONOS: MECH-DEMON", 480, boxY + 76);
+        ctx.fillStyle = '#ffffff';
+        ctx.fillText("MECH-DEMON STATE: OVERDRIVE (第二形态激活)", 480, by + 80);
         
-        // Line 3: Description name
-        ctx.shadowColor = '#d946ef';
-        ctx.font = 'normal 13px monospace';
-        ctx.fillStyle = '#cbd5e1';
-        ctx.fillText("时空毁灭者 · 最终裁决者「 克罗诺斯 」", 480, boxY + 110);
+        ctx.font = 'bold 11px monospace';
+        ctx.fillStyle = '#fbbf24';
+        ctx.fillText("⚡ CORES CRITICAL: INITIATING MULTI-GRID APOCALYPSE PROTOCOL ⚡", 480, by + 122);
         
-        // Flashing footer line
-        if (Math.floor(Date.now() / 250) % 2 === 0) {
-          ctx.fillStyle = '#f43f5e';
-          ctx.beginPath();
-          ctx.arc(480, boxY + 130, 4, 0, Math.PI * 2);
-          ctx.fill();
-          ctx.font = 'bold 9px monospace';
-          ctx.fillText("INITIATING TIME-REVERSAL GRID ANNIHILATION", 480, boxY + 145);
-        }
-        
-        // Skip entry hint inside bottom letterbox bar
-        ctx.save();
-        ctx.font = 'normal 9px monospace';
-        ctx.fillStyle = 'rgba(255, 255, 255, 0.45)';
-        ctx.textAlign = 'center';
-        ctx.fillText("— PRESS J, SPACE, OR LEFT-CLICK TO INSTANTLY START BATTLE —", 480, 515);
-        ctx.restore();
-
         ctx.restore();
       } else {
         // --- DRAW ACTIVE BOSS STATUS LIFEBAR ---
@@ -4591,18 +5337,32 @@ export default function App() {
         ctx.font = 'bold 11px sans-serif';
         ctx.fillStyle = '#f1f5f9';
         ctx.textAlign = 'left';
-        ctx.fillText("🤖 CHRONOS PEAK MECH (时空主控级机甲：克罗诺斯)", 160, 42);
+        
+        if (boss.isBossSecondPhase) {
+          ctx.fillText("🤖 CHRONOS OVERDRIVE (时空毁灭级机甲：克罗诺斯 · 终极形态)", 160, 42);
+        } else {
+          ctx.fillText("🤖 CHRONOS PEAK MECH (时空主控级机甲：克罗诺斯)", 160, 42);
+        }
         
         let bossModeText = "ACTIVE (就绪)";
         if (boss.bossState === 'attack_gatling') {
           bossModeText = "🔥 CHRONO-GATLING BARRAGE (连发：时空脉冲扫射)";
+        } else if (boss.bossState === 'attack_super_gatling') {
+          bossModeText = "🔥 CHRONO-SUPER GATLING (连发：红莲·超载脉冲扫射)";
         } else if (boss.bossState === 'attack_burst') {
           bossModeText = "💠 SINGULARITY VOID BURST (爆发：奇点星爆弹幕)";
+        } else if (boss.bossState === 'attack_omega_burst') {
+          bossModeText = "💠 OMEGA SINGULARITY BURST (爆发：星流·毁灭欧米茄弹幕)";
         } else if (boss.bossState === 'attack_sweep_laser') {
           bossModeText = "⚡ THERMOBARIC PLASMA BEAM (毁灭：热压扫描激光)";
+        } else if (boss.bossState === 'attack_hyper_laser') {
+          bossModeText = "⚡ HYPER OBLITERATOR PLASMA BEAM (毁灭：终兆·极光歼灭炮)";
+        } else if (boss.bossState === 'attack_air_strike_bombardment') {
+          bossModeText = "💥 THERMOBARIC ORBITAL STRIKE (轰炸：天基红外轨道打击)";
         } else if (boss.bossState === 'reposition') {
           bossModeText = "💨 WARP DRIFT POSITIONING (时空折叠：高速位移)";
         }
+        
         ctx.font = 'bold 10px monospace';
         ctx.fillStyle = '#ef4444';
         ctx.textAlign = 'right';
@@ -4617,10 +5377,16 @@ export default function App() {
         const barWidth = 640 * healthPct;
         
         const barGrad = ctx.createLinearGradient(160, 0, 800, 0);
-        barGrad.addColorStop(0, '#ef4444');
-        barGrad.addColorStop(1, '#ec4899');
+        if (boss.isBossSecondPhase) {
+          barGrad.addColorStop(0, '#f43f5e');
+          barGrad.addColorStop(0.5, '#ef4444');
+          barGrad.addColorStop(1, '#eab308'); // Golden overdrive edge
+        } else {
+          barGrad.addColorStop(0, '#ef4444');
+          barGrad.addColorStop(1, '#ec4899');
+        }
         ctx.fillStyle = barGrad;
-        ctx.shadowColor = '#ef4444';
+        ctx.shadowColor = boss.isBossSecondPhase ? '#ef4444' : '#ef4444';
         ctx.shadowBlur = 10;
         ctx.fillRect(160, 48, barWidth, 14);
         
@@ -4635,7 +5401,7 @@ export default function App() {
         }
         
         // Panel trim box line decoration
-        ctx.strokeStyle = '#38bdf8';
+        ctx.strokeStyle = boss.isBossSecondPhase ? '#fbbf24' : '#38bdf8';
         ctx.lineWidth = 1.5;
         ctx.strokeRect(160, 48, 640, 14);
         

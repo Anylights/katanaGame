@@ -76,6 +76,21 @@ export interface EnemyState {
   deathTimer: number;
   bloodDecalsCreated: boolean;
   turnCooldown?: number;
+  iframeTimer?: number;
+  isBossSecondPhase?: boolean;
+  bossSecondPhaseTriggerTimer?: number;
+  bossReds?: Array<{ x: number, y: number, r: number, timer: number, maxTimer: number, triggeredDamage: boolean }>;
+  bossState?: string;
+  bossStateTimer?: number;
+  bossAttackCount?: number;
+  bossBurstTriggered?: number;
+  bossLaserTargetX?: number;
+  bossShootTimer?: number;
+  bossTargetX?: number;
+  bossTargetY?: number;
+  playedLandingSound?: boolean;
+  playedBlackHoleSound?: boolean;
+  playedLandingBlast?: boolean;
 }
 
 export interface BulletState {

@@ -825,7 +825,7 @@ export const LEVELS: LevelConfig[] = [
     name: '16. Showdown: Chronos Rift (终极决战：时空裂缝)',
     width: 1600,
     height: 600,
-    spawnPoint: { x: 180, y: 400 },
+    spawnPoint: { x: 800, y: 400 },
     theme: 'industrial_crimson',
     platforms: [
       // Floors
@@ -841,10 +841,7 @@ export const LEVELS: LevelConfig[] = [
       { x: 550, y: 220, width: 500, height: 20, type: 'one_way' },
       // Bounce pads for spectacular escapes
       { x: 220, y: 500, width: 60, height: 20, type: 'bounce' },
-      { x: 1320, y: 500, width: 60, height: 20, type: 'bounce' },
-      // Spike hazards in the lowered center area margins
-      { x: 450, y: 535, width: 100, height: 15, type: 'spike', color: '#ff3366' },
-      { x: 1050, y: 535, width: 100, height: 15, type: 'spike', color: '#ff3366' }
+      { x: 1320, y: 500, width: 60, height: 20, type: 'bounce' }
     ],
     enemies: [
       { type: 'boss', x: 800, y: 300 }
