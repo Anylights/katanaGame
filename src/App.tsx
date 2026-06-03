@@ -61,6 +61,8 @@ export default function App() {
     infiniteBulletTime: false,
     soundVolume: 0.5,
     visualTheme: 'neon_noir',
+    useCustomBgm: false,
+    customBgmPath: '/vaporwave1.mp3',
   });
 
   // References
@@ -75,6 +77,7 @@ export default function App() {
   // Sound sync
   useEffect(() => {
     AudioSynth.setVolume(settings.soundVolume);
+    AudioSynth.setCustomBGM(settings.useCustomBgm, settings.customBgmPath);
     if (gameState === 'playing') {
       AudioSynth.startBGM();
     } else {
@@ -83,7 +86,7 @@ export default function App() {
     return () => {
       AudioSynth.stopBGM();
     };
-  }, [gameState, settings.soundVolume]);
+  }, [gameState, settings.soundVolume, settings.useCustomBgm, settings.customBgmPath]);
 
   // Main game loop engine state (stored in ref to avoid react render lag)
   const gameLoopRef = useRef<number | null>(null);
@@ -127,20 +130,20 @@ export default function App() {
         id: `enemy_${index}_${Date.now()}`,
         type: e.type,
         x: e.x,
-        y: e.y,
+        y: e.type === 'boss' && loopRestart ? 230 : e.y,
         vx: 0,
         vy: 0,
-        width: e.type === 'shield' ? 24 : (e.type === 'shotgunner' ? 22 : 18),
-        height: 38,
+        width: e.type === 'boss' ? 70 : (e.type === 'shield' ? 24 : (e.type === 'shotgunner' ? 22 : 18)),
+        height: e.type === 'boss' ? 95 : 38,
         direction: 'left',
-        health: e.type === 'shield' ? 2 : (e.type === 'shotgunner' ? 2 : 1),
-        maxHealth: e.type === 'shield' ? 2 : (e.type === 'shotgunner' ? 2 : 1),
-        state: 'patrol',
+        health: e.type === 'boss' ? 40 : (e.type === 'shield' ? 2 : (e.type === 'shotgunner' ? 2 : 1)),
+        maxHealth: e.type === 'boss' ? 40 : (e.type === 'shield' ? 2 : (e.type === 'shotgunner' ? 2 : 1)),
+        state: e.type === 'boss' ? 'alert' : 'patrol',
         patrolMinX: e.x - (e.patrolRange || 0),
         patrolMaxX: e.x + (e.patrolRange || 0),
         shootCooldown: e.type === 'shotgunner' ? Math.random() * 60 + 30 : (Math.random() * 60 + 15),
         attackCooldown: 0,
-        noticeTimer: 0,
+        noticeTimer: e.type === 'boss' ? (loopRestart ? 0 : 180) : 0, // Bypass dramatic entrance on retry!
         alertExclamationTimer: 0,
         deathTimer: 0,
         bloodDecalsCreated: false,
@@ -196,6 +199,8 @@ export default function App() {
       lastDeathTick: 0,
       isRewinding: false,
       doubleJumpsLeft: 1,
+      slashedEnemyIds: {},
+      isBulletTimeLocked: false,
     };
   }
 
@@ -307,7 +312,15 @@ export default function App() {
     
     // 1. Check Slow-mo/Bullet-time status
     const wantsSlowMo = !!(keysPressed.current['q'] || keysPressed.current['right_click'] || keysPressed.current['control']);
-    const canBulletTime = settings.infiniteBulletTime || state.player.bulletTimeEnergy > 0;
+    
+    if (state.player.bulletTimeEnergy <= 1.0) {
+      state.player.isBulletTimeLocked = true;
+    }
+    if (!wantsSlowMo || state.player.bulletTimeEnergy >= 30.0) {
+      state.player.isBulletTimeLocked = false;
+    }
+
+    const canBulletTime = settings.infiniteBulletTime || (state.player.bulletTimeEnergy > 0 && !state.player.isBulletTimeLocked);
     const isLevelClearedCinematic = state.levelClearedCountdown !== undefined && state.levelClearedCountdown > 0;
     
     // Toggle audio slow mo state dynamically
@@ -580,17 +593,34 @@ export default function App() {
     }
 
     // 6. PROCESS PLAYER ACTIONS & PHYSICS
+    const isBossIntroActive = currentLevelIndex === 15 && state.enemies.some(e => e.type === 'boss' && e.noticeTimer > 0);
+
+    if (isBossIntroActive) {
+      const skipPressed = !!(keysPressed.current[' '] || keysPressed.current['enter'] || keysPressed.current['j'] || keysPressed.current['left_click'] || keysPressed.current['escape'] || keysPressed.current['q'] || keysPressed.current['right_click']);
+      if (skipPressed) {
+        state.enemies.forEach(e => {
+          if (e.type === 'boss' && e.noticeTimer > 0) {
+            e.noticeTimer = 0;
+            e.y = 230; // Direct active landing coordinates
+          }
+        });
+        state.camera.shake = 15 * settings.screenShakeMultiplier;
+        AudioSynth.playDeflect();
+      }
+    }
+
     if (!player.isDead) {
       // Cooldown ticker updates
       if (player.slashCooldown > 0) player.slashCooldown -= dt;
       if (player.dashCooldown > 0) player.dashCooldown -= dt;
 
       // Handle custom weapon slash attack request
-      const requestAttack = keysPressed.current['j'] || keysPressed.current['left_click'];
+      const requestAttack = !isBossIntroActive && (keysPressed.current['j'] || keysPressed.current['left_click']);
       if (requestAttack && player.slashCooldown <= 0 && !player.isDashing) {
         player.isSlasherActive = true;
         player.slashDuration = 12; // active for 12 physics ticks (delivering beautiful animated elliptical slash trail)
-        player.slashCooldown = 28; // reuse interval cooldown
+        player.slashCooldown = 14; // reuse interval cooldown (14 frames, ~233ms)
+        player.slashedEnemyIds = {}; // Track which enemies have already been damaged on this swing
         
         // Calculate slash vector (mouse targeting or directional fallback)
         const dx = mousePos.current.x + state.camera.x - player.x;
@@ -660,11 +690,11 @@ export default function App() {
       }
 
       // Dash/Roll movement triggers (Shift or Keyboard K or C)
-      const requestDash = keysPressed.current['shift'] || keysPressed.current['k'] || keysPressed.current['c'];
+      const requestDash = !isBossIntroActive && (keysPressed.current['shift'] || keysPressed.current['k'] || keysPressed.current['c']);
       if (requestDash && player.dashCooldown <= 0 && !player.isSlasherActive) {
         player.isDashing = true;
         player.dashDuration = 12; // 12 ticks iframe dash
-        player.dashCooldown = 38; // Cooldown limit
+        player.dashCooldown = 17; // Cooldown limit (17 frames, ~283ms)
 
         // Decide dash directional angle
         let dx = 0;
@@ -766,11 +796,11 @@ export default function App() {
         const groundFriction = 0.82;
 
         // Left-right navigation
-        if (keysPressed.current['a'] || keysPressed.current['arrowleft']) {
+        if (!isBossIntroActive && (keysPressed.current['a'] || keysPressed.current['arrowleft'])) {
           player.vx -= moveAcc;
           if (player.vx < -maxWalkSpeed) player.vx = -maxWalkSpeed;
           player.direction = 'left';
-        } else if (keysPressed.current['d'] || keysPressed.current['arrowright']) {
+        } else if (!isBossIntroActive && (keysPressed.current['d'] || keysPressed.current['arrowright'])) {
           player.vx += moveAcc;
           if (player.vx > maxWalkSpeed) player.vx = maxWalkSpeed;
           player.direction = 'right';
@@ -812,7 +842,7 @@ export default function App() {
         }
 
         // Jump trigger (W, Up, or Space)
-        const wantsJump = !!(keysPressed.current['w'] || keysPressed.current['arrowup'] || keysPressed.current[' ']);
+        const wantsJump = !isBossIntroActive && !!(keysPressed.current['w'] || keysPressed.current['arrowup'] || keysPressed.current[' ']);
         
         if (wantsJump) {
           if (player.coyoteTime > 0) {
@@ -1144,9 +1174,135 @@ export default function App() {
 
       // Relentless physics & gravity for alive enemies! 
       // This allows them to walk off platforms dynamically to hunt the player, rather than hovering.
-      enemy.vy += 0.38 * dt;
-      enemy.y += enemy.vy * dt;
-      resolveBoxCollisions(enemy, activeLevel.platforms, 'y', dt);
+      if (enemy.type !== 'boss') {
+        enemy.vy += 0.38 * dt;
+        enemy.y += enemy.vy * dt;
+        resolveBoxCollisions(enemy, activeLevel.platforms, 'y', dt);
+      } else {
+        // Boss behaves differently: hovers/flies smoothly without gravity!
+        if (enemy.noticeTimer > 0) {
+          enemy.noticeTimer -= dt; // Tick down noticeTimer for dramatic intro!
+          // Smooth landing from sky
+          const introProgress = Math.max(0, Math.min(1, 1 - (enemy.noticeTimer / 180)));
+          enemy.x = 800 - enemy.width / 2;
+          enemy.y = -150 + 380 * introProgress;
+          enemy.vx = 0;
+          enemy.vy = 0;
+          
+          // Gorgeous intro portal storm particles!
+          if (Math.random() < 0.35) {
+            state.particles.push({
+              x: enemy.x + Math.random() * enemy.width,
+              y: enemy.y + Math.random() * enemy.height,
+              vx: (Math.random() - 0.5) * 8,
+              vy: (Math.random() + 0.2) * 5,
+              color: '#22d3ee',
+              size: Math.random() * 4 + 1.5,
+              alpha: 0.9,
+              decay: 0.05,
+              gravity: 0.05,
+              dampening: 0.95,
+              type: 'spark'
+            });
+          }
+          if (enemy.noticeTimer <= 2) {
+            // Intro ending smash trigger shockwaves!
+            state.camera.shake = 25 * settings.screenShakeMultiplier;
+            AudioSynth.playDeflect(); // play massive deflect splash sound
+            for (let k = 0; k < 25; k++) {
+              state.particles.push({
+                x: enemy.x + enemy.width / 2,
+                y: enemy.y + enemy.height - 10,
+                vx: (Math.random() - 0.5) * 12,
+                vy: -Math.random() * 8,
+                color: '#ec4899',
+                size: Math.random() * 5 + 2,
+                alpha: 1,
+                decay: 0.02,
+                gravity: 0.12,
+                dampening: 0.95,
+                type: 'spark'
+              });
+            }
+          }
+        } else {
+          // ACTIVE BOSS STATE ENGINE!
+          if (enemy.bossState === undefined) {
+            enemy.bossState = 'idle';
+            enemy.bossStateTimer = 65;
+            enemy.bossAttackCount = 0;
+          }
+          
+          enemy.bossStateTimer -= dt;
+          
+          if (enemy.bossStateTimer <= 0) {
+            // Select next active state in cycle
+            const BOSS_ATTACKS = ['reposition', 'attack_gatling', 'reposition', 'attack_burst', 'reposition', 'attack_sweep_laser'];
+            enemy.bossAttackCount = (enemy.bossAttackCount || 0) + 1;
+            const nextState = BOSS_ATTACKS[enemy.bossAttackCount % BOSS_ATTACKS.length];
+            enemy.bossState = nextState;
+            
+            if (nextState === 'reposition') {
+              const spots = [
+                { x: 180, y: 160 },
+                { x: 350, y: 180 },
+                { x: 750, y: 140 },
+                { x: 1100, y: 180 },
+                { x: 1350, y: 160 }
+              ];
+              // Pick a spot reasonably far away from current position
+              let chosen = spots[Math.floor(Math.random() * spots.length)];
+              if (Math.abs(enemy.x - chosen.x) < 180) {
+                chosen = spots[(spots.indexOf(chosen) + 2) % spots.length];
+              }
+              enemy.bossTargetX = chosen.x;
+              enemy.bossTargetY = chosen.y;
+              enemy.bossStateTimer = 75; // frames to fly
+            } else if (nextState === 'attack_gatling') {
+              enemy.bossStateTimer = 140; // 140 ticks of continuous fire
+            } else if (nextState === 'attack_burst') {
+              enemy.bossStateTimer = 70; // 40 energy gathering, 30 burst trigger release
+            } else if (nextState === 'attack_sweep_laser') {
+              enemy.bossStateTimer = 110; // Red indicator laser sweep
+            } else {
+              enemy.bossState = 'idle';
+              enemy.bossStateTimer = 60;
+            }
+          }
+          
+          // Translate position/reposition smooth flight glide
+          if (enemy.bossState === 'reposition') {
+            const tx = enemy.bossTargetX || 800;
+            const ty = enemy.bossTargetY || 200;
+            enemy.vx = (tx - enemy.x) * 0.08 * dt;
+            enemy.vy = (ty - enemy.y) * 0.08 * dt;
+            enemy.x += enemy.vx;
+            enemy.y += enemy.vy;
+            
+            // Jet exhaust drift sparks
+            if (Math.random() < 0.3) {
+              state.particles.push({
+                x: enemy.x + enemy.width / 2,
+                y: enemy.y + enemy.height - 10,
+                vx: -enemy.vx * 0.5 + (Math.random() - 0.5) * 3,
+                vy: 2 + Math.random() * 4,
+                color: '#ec4899',
+                size: Math.random() * 3 + 1,
+                alpha: 0.95,
+                decay: 0.04,
+                gravity: 0.05,
+                dampening: 0.95,
+                type: 'spark'
+              });
+            }
+          } else {
+            // Hover bobbing smoothly in place
+            enemy.vx = 0;
+            enemy.vy = 0;
+            enemy.y += Math.sin(state.currentTick * 0.06) * 0.22 * dt;
+          }
+        }
+      }
 
       // Spikes collision check: spikes kill the enemy instantly with satisfying fx!
       let enemyCollidedWithSpike = false;
@@ -1172,45 +1328,50 @@ export default function App() {
       const dyToPlayer = player.y - enemy.y;
       const distToPlayer = Math.hypot(dxToPlayer, dyToPlayer);
 
-      // Vision check: inside vision cone?
-      const inRangeOfSight = distToPlayer < 280;
-      const isFacingPlayer = (enemy.direction === 'left' && dxToPlayer < 0) || 
-                            (enemy.direction === 'right' && dxToPlayer > 0);
-      const hasDirectLineOfSight = inRangeOfSight && (isFacingPlayer || distToPlayer < 90) && !player.isDead;
+      // Vision and patrol check ONLY for non-boss enemies!
+      if (enemy.type !== 'boss') {
+        // Vision check: inside vision cone?
+        const inRangeOfSight = distToPlayer < 280;
+        const isFacingPlayer = (enemy.direction === 'left' && dxToPlayer < 0) || 
+                              (enemy.direction === 'right' && dxToPlayer > 0);
+        const hasDirectLineOfSight = inRangeOfSight && (isFacingPlayer || distToPlayer < 90) && !player.isDead;
 
-      // Behavior decision finite state machine state changes
-      if (hasDirectLineOfSight) {
-        if (enemy.state === 'patrol') {
-          enemy.state = 'alert';
-          enemy.alertExclamationTimer = 25; // Play alert banner bubble!
-          enemy.noticeTimer = 15; // Delay attack preparation
+        // Behavior decision finite state machine state changes
+        if (hasDirectLineOfSight) {
+          if (enemy.state === 'patrol') {
+            enemy.state = 'alert';
+            enemy.alertExclamationTimer = 25; // Play alert banner bubble!
+            enemy.noticeTimer = 15; // Delay attack preparation
+          }
+        } else {
+          // Relentless pursuit within 750px of player: stay alert and chase!
+          if (enemy.state === 'alert' && distToPlayer > 750) {
+            enemy.state = 'patrol';
+          }
         }
-      } else {
-        // Relentless pursuit within 750px of player: stay alert and chase!
-        if (enemy.state === 'alert' && distToPlayer > 750) {
-          enemy.state = 'patrol';
+
+        // Execute specific behaviors
+        if (enemy.state === 'patrol') {
+          const patrolSpeed = 1.2 * dt;
+          if (enemy.patrolMaxX > enemy.patrolMinX) {
+            if (enemy.direction === 'right') {
+              enemy.vx = patrolSpeed;
+              if (enemy.x >= enemy.patrolMaxX || isHeadingTowardSpike(enemy, 1, activeLevel.platforms)) {
+                enemy.direction = 'left';
+              }
+            } else {
+              enemy.vx = -patrolSpeed;
+              if (enemy.x <= enemy.patrolMinX || isHeadingTowardSpike(enemy, -1, activeLevel.platforms)) {
+                enemy.direction = 'right';
+              }
+            }
+            enemy.x += enemy.vx;
+            resolveBoxCollisions(enemy, activeLevel.platforms, 'x', dt);
+          }
         }
       }
 
-      // Execute specific behaviors
-      if (enemy.state === 'patrol') {
-        const patrolSpeed = 1.2 * dt;
-        if (enemy.patrolMaxX > enemy.patrolMinX) {
-          if (enemy.direction === 'right') {
-            enemy.vx = patrolSpeed;
-            if (enemy.x >= enemy.patrolMaxX || isHeadingTowardSpike(enemy, 1, activeLevel.platforms)) {
-              enemy.direction = 'left';
-            }
-          } else {
-            enemy.vx = -patrolSpeed;
-            if (enemy.x <= enemy.patrolMinX || isHeadingTowardSpike(enemy, -1, activeLevel.platforms)) {
-              enemy.direction = 'right';
-            }
-          }
-          enemy.x += enemy.vx;
-          resolveBoxCollisions(enemy, activeLevel.platforms, 'x', dt);
-        }
-      } else if (enemy.state === 'alert' || enemy.state === 'attack') {
+      if (enemy.state === 'alert' || enemy.state === 'attack' || enemy.type === 'boss') {
         // Target tracking with reaction delay/turn cooldown so players can slip behind!
         if (enemy.turnCooldown === undefined) {
           enemy.turnCooldown = 0;
@@ -1229,7 +1390,9 @@ export default function App() {
           }
         }
         
-        enemy.noticeTimer -= dt;
+        if (enemy.type !== 'boss') {
+          enemy.noticeTimer -= dt;
+        }
         
         if (enemy.noticeTimer <= 0) {
           // Act on combat class type (shorter shooter handling)
@@ -1320,6 +1483,188 @@ export default function App() {
                 enemy.shootCooldown = enemy.type === 'sniper' ? 22 : 45; // sniper fast (was 45), gunner moderate (was 100)
               }
             }
+          } else if (enemy.type === 'boss') {
+            // Target tracking and facing player
+            const isFacingRight = dxToPlayer > 0;
+            enemy.direction = isFacingRight ? 'right' : 'left';
+            
+            // Execute boss attacks based on current bossState!
+            if (enemy.bossState === 'attack_gatling') {
+              if (enemy.bossShootTimer === undefined) {
+                enemy.bossShootTimer = 0;
+              }
+              enemy.bossShootTimer -= dt;
+              if (enemy.bossShootTimer <= 0) {
+                enemy.bossShootTimer = 6; // fire every 6 ticks!
+                
+                // Fire single-targeted bullet splayed slightly
+                const shootAngle = Math.atan2(dyToPlayer + 15, dxToPlayer) + (Math.random() - 0.5) * 0.15;
+                const bSpeed = 11.5;
+                const bulletX = enemy.x + (enemy.direction === 'right' ? 55 : 15);
+                const bulletY = enemy.y + 40;
+                
+                state.bullets.push({
+                  id: `boss_gatling_${Date.now()}_${Math.random()}`,
+                  x: bulletX,
+                  y: bulletY,
+                  vx: Math.cos(shootAngle) * bSpeed,
+                  vy: Math.sin(shootAngle) * bSpeed,
+                  radius: 5,
+                  isDeflected: false,
+                  ownerId: enemy.id,
+                  startX: bulletX,
+                  startY: bulletY
+                });
+                
+                // Sparks of cannon fire
+                for (let f = 0; f < 3; f++) {
+                  state.particles.push({
+                    x: bulletX,
+                    y: bulletY,
+                    vx: Math.cos(shootAngle) * (4 + Math.random() * 4),
+                    vy: Math.sin(shootAngle) * (Math.random() - 0.5) * 4,
+                    color: '#ff3366',
+                    size: Math.random() * 3.5 + 1.5,
+                    alpha: 0.95,
+                    decay: 0.1,
+                    gravity: 0,
+                    dampening: 0.9,
+                    type: 'spark'
+                  });
+                }
+                AudioSynth.playBulletFired();
+              }
+            } else if (enemy.bossState === 'attack_burst') {
+              // Gathering indicator sparkles: converging onto boss core reactor!
+              if (enemy.bossStateTimer > 25) {
+                if (Math.random() < 0.45) {
+                  const angle = Math.random() * Math.PI * 2;
+                  const rad = 50 + Math.random() * 100;
+                  const cx = enemy.x + enemy.width / 2;
+                  const cy = enemy.y + 40;
+                  state.particles.push({
+                    x: cx + Math.cos(angle) * rad,
+                    y: cy + Math.sin(angle) * rad,
+                    vx: -Math.cos(angle) * 3,
+                    vy: -Math.sin(angle) * 3,
+                    color: '#22d3ee', // energetic cyan sparks
+                    size: Math.random() * 4 + 2,
+                    alpha: 0.95,
+                    decay: 0.03,
+                    gravity: 0,
+                    dampening: 1,
+                    type: 'spark'
+                  });
+                }
+              } else if (enemy.bossStateTimer <= 25 && enemy.bossStateTimer > 0) {
+                // Radial Cross Burst Trigger!
+                if (enemy.bossBurstTriggered === undefined || enemy.bossBurstTriggered <= 0) {
+                  enemy.bossBurstTriggered = 1; // trigger once
+                  
+                  // Release circular ring of bullet orbs
+                  const cx = enemy.x + enemy.width / 2;
+                  const cy = enemy.y + 40;
+                  AudioSynth.playDeflect(); // loud metal chime sound
+                  state.camera.shake = 16 * settings.screenShakeMultiplier;
+                  
+                  const numProjectiles = 14;
+                  for (let i = 0; i < numProjectiles; i++) {
+                    const angle = (i / numProjectiles) * Math.PI * 2;
+                    const bSpeed = 7.5;
+                    state.bullets.push({
+                      id: `boss_burst_${Date.now()}_b_${i}_${Math.random()}`,
+                      x: cx,
+                      y: cy,
+                      vx: Math.cos(angle) * bSpeed,
+                      vy: Math.sin(angle) * bSpeed,
+                      radius: 5,
+                      isDeflected: false,
+                      ownerId: enemy.id,
+                      startX: cx,
+                      startY: cy
+                    });
+                  }
+                  
+                  // Flash visual shockwave effect
+                  state.particles.push({
+                    x: cx,
+                    y: cy,
+                    vx: 0,
+                    vy: 0,
+                    color: 'rgba(236, 72, 153, 0.95)',
+                    size: 15,
+                    alpha: 1,
+                    decay: 0.03,
+                    gravity: 0,
+                    dampening: 1,
+                    type: 'shockwave'
+                  });
+                }
+              } else {
+                enemy.bossBurstTriggered = 0; // reset
+              }
+            } else if (enemy.bossState === 'attack_sweep_laser') {
+              // Devastating sweep laser action!
+              const mx = enemy.x + enemy.width / 2;
+              const my = enemy.y + 40;
+              
+              const sweepProgress = (110 - enemy.bossStateTimer) / 110; // 0 to 1 progress
+              let targetX = 0;
+              if (enemy.direction === 'right') {
+                targetX = 180 + sweepProgress * 1300; // Sweep left to right across floor
+              } else {
+                targetX = 1450 - sweepProgress * 1300; // Sweep right to left across floor
+              }
+              
+              if (enemy.bossStateTimer > 80) {
+                // Warmup warning tracking sight line
+                enemy.bossLaserTargetX = targetX;
+              } else if (enemy.bossStateTimer <= 80 && enemy.bossStateTimer > 10) {
+                // ACTIVE incineration laser active!
+                enemy.bossLaserTargetX = targetX;
+                
+                // Vector line projection check for Player damage collision!
+                const px = player.x + player.width / 2;
+                const py = player.y + player.height / 2;
+                const lx = enemy.bossLaserTargetX;
+                const ly = 550; // Arena ground Y level
+                
+                const ldx = lx - mx;
+                const ldy = ly - my;
+                const len = Math.hypot(ldx, ldy);
+                if (len > 0) {
+                  const t = Math.max(0, Math.min(1, ((px - mx) * ldx + (py - my) * ldy) / (len * len)));
+                  const projX = mx + t * ldx;
+                  const projY = my + t * ldy;
+                  const dist = Math.hypot(px - projX, py - projY);
+                  
+                  if (dist < 25 && !player.isDead && !player.isDashing) {
+                    // Trigger death instantly
+                    triggerPlayerDeath('Incinerated by Chronos Thermobaric Beam.');
+                  }
+                }
+                
+                // Spawn boiling particles on floor hit contact
+                if (Math.random() < 0.6) {
+                  state.camera.shake = 1.2 * settings.screenShakeMultiplier;
+                  for (let f = 0; f < 3; f++) {
+                    state.particles.push({
+                      x: targetX,
+                      y: 550,
+                      vx: (Math.random() - 0.5) * 8,
+                      vy: -Math.random() * 8,
+                      color: Math.random() < 0.5 ? '#f43f5e' : '#eab308',
+                      size: Math.random() * 5 + 1.5,
+                      alpha: 0.95,
+                      decay: 0.05,
+                      gravity: 0.08,
+                      dampening: 0.95,
+                      type: 'spark'
+                    });
+                  }
+                }
+              }
+            }
           } else if (enemy.type === 'grunt' || enemy.type === 'shield') {
             // Chase down player to strike!
             const chaseSpeed = (enemy.type === 'shield' ? 1.4 : 2.5) * dt;
@@ -1357,63 +1702,69 @@ export default function App() {
 
       // Check if Player gets within sweeping sword slash of enemy grunts
       if (player.isSlasherActive && !player.isDead) {
-        const slashRadius = 70;
-        const pCenterX = player.x + player.width / 2;
-        const pCenterY = player.y + player.height / 2;
-        const eCenterX = enemy.x + enemy.width / 2;
-        const eCenterY = enemy.y + enemy.height / 2;
-        const d = Math.hypot(eCenterX - pCenterX, eCenterY - pCenterY);
+        if (!player.slashedEnemyIds?.[enemy.id]) {
+          const slashRadius = 70;
+          const pCenterX = player.x + player.width / 2;
+          const pCenterY = player.y + player.height / 2;
+          const eCenterX = enemy.x + enemy.width / 2;
+          const eCenterY = enemy.y + enemy.height / 2;
+          const d = Math.hypot(eCenterX - pCenterX, eCenterY - pCenterY);
 
-        if (d <= slashRadius) {
-          // Inside cutting angle arc?
-          const angleToEnemy = Math.atan2(eCenterY - pCenterY, eCenterX - pCenterX);
-          let angleDiff = Math.abs(angleToEnemy - player.slashAngle);
-          if (angleDiff > Math.PI) angleDiff = 2 * Math.PI - angleDiff;
+          if (d <= slashRadius) {
+            // Inside cutting angle arc?
+            const angleToEnemy = Math.atan2(eCenterY - pCenterY, eCenterX - pCenterX);
+            let angleDiff = Math.abs(angleToEnemy - player.slashAngle);
+            if (angleDiff > Math.PI) angleDiff = 2 * Math.PI - angleDiff;
 
-          if (angleDiff <= Math.PI * 0.7) {
-            // Defeated by slash slice!
-            if (enemy.type === 'shield') {
-              // Direct shield block defense if facing player slash and not slashing from above, below, or behind!
-              const isPlayerOnRight = player.x > enemy.x;
-              const isShieldFacingRight = enemy.direction === 'right';
-              
-              // Generous checks for above and below to ensure responsive and fair collision bypass
-              const isPlayerAbove = (player.y + player.height < enemy.y + 22) || (pCenterY < enemy.y + 10) || (Math.sin(angleToEnemy) > 0.60);
-              const isPlayerBelow = (player.y > enemy.y + enemy.height - 22) || (pCenterY > enemy.y + enemy.height - 10) || (Math.sin(angleToEnemy) < -0.60);
-              const isFacingFront = (isPlayerOnRight && isShieldFacingRight) || (!isPlayerOnRight && !isShieldFacingRight);
-              
-              const hitShieldFacingFront = isFacingFront && !isPlayerAbove && !isPlayerBelow;
+            if (angleDiff <= Math.PI * 0.7) {
+              // Defeated by slash slice!
+              if (enemy.type === 'shield') {
+                // Direct shield block defense if facing player slash and not slashing from above, below, or behind!
+                const isPlayerOnRight = player.x > enemy.x;
+                const isShieldFacingRight = enemy.direction === 'right';
+                
+                // Generous checks for above and below to ensure responsive and fair collision bypass
+                const isPlayerAbove = (player.y + player.height < enemy.y + 22) || (pCenterY < enemy.y + 10) || (Math.sin(angleToEnemy) > 0.60);
+                const isPlayerBelow = (player.y > enemy.y + enemy.height - 22) || (pCenterY > enemy.y + enemy.height - 10) || (Math.sin(angleToEnemy) < -0.60);
+                const isFacingFront = (isPlayerOnRight && isShieldFacingRight) || (!isPlayerOnRight && !isShieldFacingRight);
+                
+                const hitShieldFacingFront = isFacingFront && !isPlayerAbove && !isPlayerBelow;
 
-              if (hitShieldFacingFront) {
-                // BLOCK! Sparks recoil!
-                AudioSynth.playDeflect();
-                player.vx = isPlayerOnRight ? 4 : -4; // bounce player
-                state.camera.shake = 5;
+                if (hitShieldFacingFront) {
+                  // BLOCK! Sparks recoil!
+                  AudioSynth.playDeflect();
+                  player.vx = isPlayerOnRight ? 4 : -4; // bounce player
+                  state.camera.shake = 5;
 
-                for (let k = 0; k < 6; k++) {
-                  state.particles.push({
-                    x: enemy.x + (isShieldFacingRight ? 24 : -4),
-                    y: enemy.y + 18,
-                    vx: (isShieldFacingRight ? 3 : -3) + (Math.random() * 2),
-                    vy: (Math.random() - 0.5) * 5,
-                    color: '#d4d4d8', // metal block sparks
-                    size: Math.random() * 2 + 1,
-                    alpha: 0.9,
-                    decay: 0.08,
-                    gravity: 0.1,
-                    dampening: 0.9,
-                    type: 'spark'
-                  });
+                  for (let k = 0; k < 6; k++) {
+                    state.particles.push({
+                      x: enemy.x + (isShieldFacingRight ? 24 : -4),
+                      y: enemy.y + 18,
+                      vx: (isShieldFacingRight ? 3 : -3) + (Math.random() * 2),
+                      vy: (Math.random() - 0.5) * 5,
+                      color: '#d4d4d8', // metal block sparks
+                      size: Math.random() * 2 + 1,
+                      alpha: 0.9,
+                      decay: 0.08,
+                      gravity: 0.1,
+                      dampening: 0.9,
+                      type: 'spark'
+                    });
+                  }
+                  // Break attacking trigger to avoid killing on same frame
+                  player.isSlasherActive = false;
+                } else {
+                  // Slice from behind! Fatal damage!
+                  if (!player.slashedEnemyIds) player.slashedEnemyIds = {};
+                  player.slashedEnemyIds[enemy.id] = true;
+                  damageEnemy(enemy, 1, player.slashAngle);
                 }
-                // Break attacking trigger to avoid killing on same frame
-                player.isSlasherActive = false;
               } else {
-                // Slice from behind! Fatal damage!
+                // Instantly cut down!
+                if (!player.slashedEnemyIds) player.slashedEnemyIds = {};
+                player.slashedEnemyIds[enemy.id] = true;
                 damageEnemy(enemy, 1, player.slashAngle);
               }
-            } else {
-              // Instantly cut down!
-              damageEnemy(enemy, 1, player.slashAngle);
             }
           }
         }
@@ -1550,7 +1901,7 @@ export default function App() {
     const isDownPressed = isPlayer && !!(keysPressed.current['s'] || keysPressed.current['arrowdown']);
 
     for (const plat of platforms) {
-      if (plat.type !== 'solid' && plat.type !== 'one_way') continue; // only process solid and one_way platforms
+      if (plat.type !== 'solid' && plat.type !== 'one_way' && plat.type !== 'bounce') continue;
 
       const collides = (
         entity.x < plat.x + plat.width &&
@@ -1560,7 +1911,34 @@ export default function App() {
       );
 
       if (collides) {
-        if (plat.type === 'one_way') {
+        if (plat.type === 'bounce') {
+          if (axis !== 'y') continue;
+          if (entity.vy <= 0) continue;
+
+          const prevBottom = entity.y + entity.height - (entity.vy * dt);
+          if (prevBottom > plat.y + 6) continue; // inside already
+
+          entity.y = plat.y - entity.height;
+          entity.vy = -14.5; // Epic bounce height!
+          if ('isGrounded' in entity) {
+            entity.isGrounded = false;
+          }
+          AudioSynth.playJump();
+          for (let k = 0; k < 15; k++) {
+            playStateRef.current.particles.push({
+              id: 'bpt_' + Math.random(),
+              x: plat.x + Math.random() * plat.width,
+              y: plat.y,
+              vx: (Math.random() - 0.5) * 6,
+              vy: -Math.random() * 6 - 4,
+              color: '#c084fc',
+              size: Math.random() * 3 + 2,
+              alpha: 1,
+              decay: 0.02,
+              type: 'spark'
+            });
+          }
+        } else if (plat.type === 'one_way') {
           // One-way platforms: only collide on Y-axis, moving downward, previous bottom above top, and not pressing down (S or DownArrow)
           if (axis !== 'y') continue;
           if (entity.vy <= 0) continue;
@@ -1842,7 +2220,7 @@ export default function App() {
   function renderGame(ctx: CanvasRenderingContext2D) {
     const state = playStateRef.current;
     const wantsSlowMo = !!(keysPressed.current['q'] || keysPressed.current['right_click'] || keysPressed.current['control']);
-    const canBulletTime = settings.infiniteBulletTime || state.player.bulletTimeEnergy > 0;
+    const canBulletTime = settings.infiniteBulletTime || (state.player.bulletTimeEnergy > 0 && !state.player.isBulletTimeLocked);
     const isLevelClearedCinematic = state.levelClearedCountdown !== undefined && state.levelClearedCountdown > 0;
     const isCurrentlySlow = (wantsSlowMo && canBulletTime && !state.player.isDead && !state.player.isRewinding) || isLevelClearedCinematic;
 
@@ -1887,20 +2265,31 @@ export default function App() {
 
     // Draw Game Level Platforms
     activeLevel.platforms.forEach(plat => {
+      const activeTheme = activeLevel.theme || 'cyber_neon';
+      let presetTheme = activeTheme;
+      if (settings.visualTheme === 'matrix_green') {
+        presetTheme = 'matrix_green';
+      } else if (settings.visualTheme === 'monochrome') {
+        presetTheme = 'monochrome_cyber';
+      } else if (settings.visualTheme === 'retro_arcade') {
+        presetTheme = 'vaporwave';
+      }
+      const preset = THEME_PRESETS[presetTheme] || THEME_PRESETS.cyber_neon;
+
       if (plat.type === 'solid') {
-        // Metallic dark grey structures with cyan outline
-        ctx.fillStyle = '#1e293b';
+        // Metallic dark grey structures with themed outline
+        ctx.fillStyle = preset.solidBlockFill;
         ctx.fillRect(plat.x, plat.y, plat.width, plat.height);
         
-        ctx.strokeStyle = '#22d3ee'; // Cyan cyber edge line
+        ctx.strokeStyle = preset.solidBlockOutline;
         ctx.lineWidth = 2;
         ctx.strokeRect(plat.x, plat.y, plat.width, plat.height);
       } else if (plat.type === 'one_way') {
-        // Beautiful semi-translucent pass-through grid plate
-        ctx.fillStyle = 'rgba(14, 116, 144, 0.35)'; // semi-translucent elegant teal glass
+        // Beautiful themed semi-translucent pass-through grid plate
+        ctx.fillStyle = preset.oneWayFill;
         ctx.fillRect(plat.x, plat.y, plat.width, plat.height);
         
-        ctx.strokeStyle = '#22d3ee'; // bright cyan top bar edge
+        ctx.strokeStyle = preset.oneWayOutline;
         ctx.lineWidth = 2.5;
         ctx.beginPath();
         ctx.moveTo(plat.x, plat.y);
@@ -1908,7 +2297,7 @@ export default function App() {
         ctx.stroke();
 
         // Elegant dashed subtitle glow
-        ctx.strokeStyle = 'rgba(34, 211, 238, 0.44)';
+        ctx.strokeStyle = preset.oneWayOutline + '70'; // translucent outline shade
         ctx.lineWidth = 1;
         ctx.setLineDash([4, 6]);
         ctx.beginPath();
@@ -1916,9 +2305,36 @@ export default function App() {
         ctx.lineTo(plat.x + plat.width, plat.y + 4);
         ctx.stroke();
         ctx.setLineDash([]); // clear dash state
+      } else if (plat.type === 'bounce') {
+        // Glowing lavender jump pads with animated rising neon indicators
+        ctx.fillStyle = 'rgba(124, 58, 237, 0.22)';
+        ctx.fillRect(plat.x, plat.y, plat.width, plat.height);
+
+        ctx.strokeStyle = '#c084fc';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(plat.x, plat.y, plat.width, plat.height);
+
+        // Scrolling chevron arrows
+        ctx.strokeStyle = '#a855f7';
+        ctx.lineWidth = 1.5;
+        const time = Date.now();
+        const arrowOffset = (time / 15) % 15;
+        ctx.save();
+        ctx.beginPath();
+        for (let offsetX = 12; offsetX < plat.width - 4; offsetX += 20) {
+          const arrowX = plat.x + offsetX;
+          const arrowY = plat.y + plat.height - arrowOffset;
+          if (arrowY > plat.y + 2 && arrowY < plat.y + plat.height - 2) {
+            ctx.moveTo(arrowX - 4, arrowY + 3);
+            ctx.lineTo(arrowX, arrowY);
+            ctx.lineTo(arrowX + 4, arrowY + 3);
+          }
+        }
+        ctx.stroke();
+        ctx.restore();
       } else if (plat.type === 'spike') {
         // Draw sharp death points
-        ctx.fillStyle = plat.color || '#f43f5e';
+        ctx.fillStyle = plat.color || preset.solidBlockOutline;
         const spikeCount = Math.floor(plat.width / 10);
         for (let i = 0; i < spikeCount; i++) {
           ctx.beginPath();
@@ -2020,6 +2436,62 @@ export default function App() {
 
       // Live animated enemies shapes
       drawPixelEnemy(ctx, enemy, state.currentTick);
+
+      // Render custom boss laser beams
+      if (enemy.type === 'boss' && enemy.health > 0 && enemy.noticeTimer <= 0) {
+        if (enemy.bossState === 'attack_sweep_laser') {
+          const mx = enemy.x + enemy.width / 2;
+          const my = enemy.y + 40;
+          const targetX = enemy.bossLaserTargetX || mx;
+          const targetY = 550; // ground level Y line
+          
+          if (enemy.bossStateTimer > 80) {
+            // Render warning aiming indicator line (dashed red laser)
+            ctx.save();
+            ctx.shadowColor = '#ef4444';
+            ctx.shadowBlur = 10;
+            ctx.strokeStyle = '#ef4444';
+            ctx.lineWidth = 1.8;
+            ctx.setLineDash([5, 8]);
+            ctx.beginPath();
+            ctx.moveTo(mx, my);
+            ctx.lineTo(targetX, targetY);
+            ctx.stroke();
+            ctx.setLineDash([]);
+            
+            // Draw targeting warning text
+            ctx.font = 'bold 9px monospace';
+            ctx.fillStyle = '#ef4444';
+            ctx.textAlign = 'center';
+            ctx.fillText("⚠️ CRITICAL THERMOBARIC SCANNING ⚠️", targetX, targetY - 15);
+            ctx.restore();
+          } else if (enemy.bossStateTimer <= 80 && enemy.bossStateTimer > 10) {
+            // Drawing the massive active plasma beam!
+            ctx.save();
+            
+            // Outer thick pink glow
+            ctx.shadowColor = '#ec4899';
+            ctx.shadowBlur = 24;
+            ctx.strokeStyle = '#ec4899';
+            ctx.lineWidth = 15 + Math.sin(state.currentTick * 0.8) * 4;
+            ctx.beginPath();
+            ctx.moveTo(mx, my);
+            ctx.lineTo(targetX, targetY);
+            ctx.stroke();
+            
+            // Inner superheated white core
+            ctx.shadowBlur = 0;
+            ctx.strokeStyle = '#ffffff';
+            ctx.lineWidth = 6 + Math.sin(state.currentTick * 0.8) * 1.5;
+            ctx.beginPath();
+            ctx.moveTo(mx, my);
+            ctx.lineTo(targetX, targetY);
+            ctx.stroke();
+            
+            ctx.restore();
+          }
+        }
+      }
     });
 
     // Draw player bullets lasers
@@ -2399,6 +2871,9 @@ export default function App() {
       }
     }
 
+    // Draw Boss Battle HUD
+    drawBossHUD(ctx, state);
+
     // Draw VHS "REC" Overlay in play mode to look retro
     drawVhsRecordingOverlay(ctx, state.player.bulletTimeEnergy, isCurrentlySlow, state.player.isRewinding);
   }
@@ -2718,6 +3193,129 @@ export default function App() {
     ctx.restore();
   }
 
+  const THEME_PRESETS: Record<string, {
+    skyTop: string;
+    skyBottom: string;
+    sunColor: string;
+    sunGlow: string;
+    isEclipse?: boolean;
+    bgLayer1: string;
+    bgLayer2: string;
+    bgLayer3: string;
+    windowColor1: string;
+    windowColor2: string;
+    windowColor3: string;
+    gridLineColor: string;
+    solidBlockFill: string;
+    solidBlockOutline: string;
+    oneWayFill: string;
+    oneWayOutline: string;
+  }> = {
+    cyber_neon: {
+      skyTop: '#0a0515',
+      skyBottom: '#200c35',
+      sunColor: '#06b6d4',
+      sunGlow: 'rgba(6, 182, 212, 0.25)',
+      bgLayer1: '#140c21',
+      bgLayer2: '#1f1334',
+      bgLayer3: '#0e0918',
+      windowColor1: 'rgba(34, 211, 238, 0.15)',
+      windowColor2: 'rgba(52, 211, 153, 0.3)',
+      windowColor3: 'rgba(6, 182, 212, 0.45)',
+      gridLineColor: 'rgba(34, 211, 238, 0.04)',
+      solidBlockFill: '#1e293b',
+      solidBlockOutline: '#22d3ee',
+      oneWayFill: 'rgba(14, 116, 144, 0.35)',
+      oneWayOutline: '#22d3ee',
+    },
+    vaporwave: {
+      skyTop: '#19021a',
+      skyBottom: '#450059',
+      sunColor: '#ec4899',
+      sunGlow: 'rgba(235, 72, 153, 0.35)',
+      bgLayer1: '#1c0722',
+      bgLayer2: '#2b0b35',
+      bgLayer3: '#130419',
+      windowColor1: 'rgba(236, 72, 153, 0.15)',
+      windowColor2: 'rgba(168, 85, 247, 0.3)',
+      windowColor3: 'rgba(235, 72, 153, 0.5)',
+      gridLineColor: 'rgba(235, 72, 153, 0.05)',
+      solidBlockFill: '#1e1b4b',
+      solidBlockOutline: '#f43f5e',
+      oneWayFill: 'rgba(124, 58, 237, 0.35)',
+      oneWayOutline: '#ec4899',
+    },
+    matrix_green: {
+      skyTop: '#010a01',
+      skyBottom: '#052405',
+      sunColor: '#10b981',
+      sunGlow: 'rgba(16, 185, 129, 0.25)',
+      bgLayer1: '#031403',
+      bgLayer2: '#062006',
+      bgLayer3: '#020b02',
+      windowColor1: 'rgba(16, 185, 129, 0.15)',
+      windowColor2: 'rgba(52, 211, 153, 0.25)',
+      windowColor3: 'rgba(16, 185, 129, 0.4)',
+      gridLineColor: 'rgba(16, 185, 129, 0.06)',
+      solidBlockFill: '#062006',
+      solidBlockOutline: '#10b981',
+      oneWayFill: 'rgba(4, 120, 87, 0.3)',
+      oneWayOutline: '#34d399',
+    },
+    amber_sunset: {
+      skyTop: '#180402',
+      skyBottom: '#421404',
+      sunColor: '#eab308',
+      sunGlow: 'rgba(234, 179, 8, 0.3)',
+      bgLayer1: '#1f0d04',
+      bgLayer2: '#301407',
+      bgLayer3: '#140803',
+      windowColor1: 'rgba(245, 158, 11, 0.15)',
+      windowColor2: 'rgba(234, 179, 8, 0.3)',
+      windowColor3: 'rgba(249, 115, 22, 0.45)',
+      gridLineColor: 'rgba(245, 158, 11, 0.05)',
+      solidBlockFill: '#2d1808',
+      solidBlockOutline: '#f59e0b',
+      oneWayFill: 'rgba(146, 64, 14, 0.35)',
+      oneWayOutline: '#f59e0b',
+    },
+    industrial_crimson: {
+      skyTop: '#0f0204',
+      skyBottom: '#300408',
+      sunColor: '#ef4444',
+      sunGlow: 'rgba(239, 68, 68, 0.45)',
+      isEclipse: true,
+      bgLayer1: '#1c0307',
+      bgLayer2: '#2a050b',
+      bgLayer3: '#130205',
+      windowColor1: 'rgba(239, 68, 68, 0.11)',
+      windowColor2: 'rgba(245, 158, 11, 0.25)',
+      windowColor3: 'rgba(239, 68, 68, 0.4)',
+      gridLineColor: 'rgba(239, 68, 68, 0.06)',
+      solidBlockFill: '#2d060a',
+      solidBlockOutline: '#ef4444',
+      oneWayFill: 'rgba(153, 27, 27, 0.35)',
+      oneWayOutline: '#f87171',
+    },
+    monochrome_cyber: {
+      skyTop: '#050508',
+      skyBottom: '#111116',
+      sunColor: '#f1f5f9',
+      sunGlow: 'rgba(241, 245, 249, 0.2)',
+      bgLayer1: '#0e0e13',
+      bgLayer2: '#16161c',
+      bgLayer3: '#09090c',
+      windowColor1: 'rgba(241, 245, 249, 0.12)',
+      windowColor2: 'rgba(148, 163, 184, 0.25)',
+      windowColor3: 'rgba(241, 245, 249, 0.4)',
+      gridLineColor: 'rgba(148, 163, 184, 0.05)',
+      solidBlockFill: '#1e293b',
+      solidBlockOutline: '#cbd5e1',
+      oneWayFill: 'rgba(71, 85, 105, 0.35)',
+      oneWayOutline: '#e2e8f0',
+    }
+  };
+
   function drawCyberpunkParallaxBackground(
     ctx: CanvasRenderingContext2D,
     camX: number,
@@ -2727,101 +3325,260 @@ export default function App() {
   ) {
     const levelIndex = currentLevelIndex;
     
-    const skyGrad = ctx.createLinearGradient(0, 0, 0, 540);
-    if (levelIndex === 0) {
-      skyGrad.addColorStop(0, '#0a0515');
-      skyGrad.addColorStop(1, '#200c35');
-    } else if (levelIndex === 1) {
-      skyGrad.addColorStop(0, '#060312');
-      skyGrad.addColorStop(1, '#1b0e36');
-    } else if (levelIndex === 2) {
-      skyGrad.addColorStop(0, '#02020a');
-      skyGrad.addColorStop(1, '#0e182e');
-    } else if (levelIndex === 3) {
-      skyGrad.addColorStop(0, '#04060c');
-      skyGrad.addColorStop(1, '#141c2d');
-    } else {
-      skyGrad.addColorStop(0, '#080202');
-      skyGrad.addColorStop(1, '#2d0a0b');
+    // Determine active theme based on active level config or manual settings override
+    let activeTheme = activeLevel.theme || 'cyber_neon';
+    if (settings.visualTheme === 'matrix_green') {
+      activeTheme = 'matrix_green';
+    } else if (settings.visualTheme === 'monochrome') {
+      activeTheme = 'monochrome_cyber';
+    } else if (settings.visualTheme === 'retro_arcade') {
+      activeTheme = 'vaporwave';
     }
+    
+    const preset = THEME_PRESETS[activeTheme] || THEME_PRESETS.cyber_neon;
+
+    // Draw Sky Gradient
+    const skyGrad = ctx.createLinearGradient(0, 0, 0, 540);
+    skyGrad.addColorStop(0, preset.skyTop);
+    skyGrad.addColorStop(1, preset.skyBottom);
     ctx.fillStyle = skyGrad;
     ctx.fillRect(0, 0, 960, 540);
 
-    ctx.save();
-    const sunX = 700 - camX * 0.015 + shakeX * 0.1;
-    const sunY = 140 - camY * 0.015 + shakeY * 0.1;
-
-    if (levelIndex === 4) {
-      const moonRadius = 75;
-      const sunGlow = ctx.createRadialGradient(sunX, sunY, 10, sunX, sunY, moonRadius * 2.2);
-      sunGlow.addColorStop(0, 'rgba(239, 68, 68, 0.45)');
-      sunGlow.addColorStop(1, 'rgba(239, 68, 68, 0)');
-      ctx.fillStyle = sunGlow;
+    // Draw Celestial Orb or Temporal Singularity Rift
+    if (levelIndex === 15) {
+      // GIGANTIC TEMPORAL COGNITIVE GEARS Silhouette
+      // Drawing Left Giant Clockwork Gear
+      ctx.save();
+      const lgX = 140 - camX * 0.05 + shakeX * 0.2;
+      const lgY = 160 - camY * 0.05 + shakeY * 0.2;
+      ctx.translate(lgX, lgY);
+      ctx.rotate(Date.now() * 0.0003);
+      ctx.fillStyle = 'rgba(28, 3, 7, 0.45)'; // Crimson shadow silhouette
+      ctx.strokeStyle = '#ef4444';
+      ctx.lineWidth = 1;
+      // Draw gear circle
       ctx.beginPath();
-      ctx.arc(sunX, sunY, moonRadius * 2.2, 0, Math.PI * 2);
+      ctx.arc(0, 0, 95, 0, Math.PI * 2);
       ctx.fill();
-
-      ctx.fillStyle = '#dc2626';
-      ctx.beginPath();
-      ctx.arc(sunX, sunY, moonRadius, 0, Math.PI * 2);
-      ctx.fill();
-
-      ctx.fillStyle = '#080202';
-      ctx.beginPath();
-      ctx.arc(sunX - 15, sunY - 10, moonRadius - 5, 0, Math.PI * 2);
-      ctx.fill();
-
-      ctx.strokeStyle = 'rgba(245, 158, 11, 0.25)';
-      ctx.lineWidth = 1.5;
-      ctx.beginPath();
-      ctx.arc(sunX, sunY, moonRadius * 1.5, 0, Math.PI * 2);
       ctx.stroke();
-
-      ctx.strokeStyle = 'rgba(239, 68, 68, 0.15)'; 
-      ctx.beginPath();
-      ctx.arc(sunX, sunY, moonRadius * 1.8, 0, Math.PI * 2);
-      ctx.stroke();
-    } else {
-      const sunRadius = 65;
-      const sunGlow = ctx.createRadialGradient(sunX, sunY, 10, sunX, sunY, sunRadius * 2);
-      let sunColor = '#f43f5e';
-      let glowColor = 'rgba(244, 63, 94, 0.35)';
-      
-      if (levelIndex === 1) {
-        sunColor = '#ec4899';
-        glowColor = 'rgba(235, 72, 153, 0.35)';
-      } else if (levelIndex === 2) {
-        sunColor = '#eab308';
-        glowColor = 'rgba(234, 179, 8, 0.3)';
-      } else if (levelIndex === 3) {
-        sunColor = '#06b6d4';
-        glowColor = 'rgba(6, 182, 212, 0.25)';
+      // Draw teeth
+      const teethCount = 12;
+      for (let t = 0; t < teethCount; t++) {
+        ctx.rotate(Math.PI * 2 / teethCount);
+        ctx.fillRect(-14, -112, 28, 24);
+        ctx.strokeRect(-14, -112, 28, 24);
       }
-
-      sunGlow.addColorStop(0, glowColor);
-      sunGlow.addColorStop(1, 'rgba(0,0,0,0)');
-      ctx.fillStyle = sunGlow;
+      // Inner cutout
+      ctx.fillStyle = preset.skyTop;
       ctx.beginPath();
-      ctx.arc(sunX, sunY, sunRadius * 2, 0, Math.PI * 2);
+      ctx.arc(0, 0, 50, 0, Math.PI * 2);
       ctx.fill();
+      ctx.stroke();
+      // Draw gear spokes
+      ctx.strokeStyle = '#ef4444';
+      ctx.lineWidth = 2.5;
+      for (let s = 0; s < 4; s++) {
+        ctx.rotate(Math.PI / 2);
+        ctx.beginPath();
+        ctx.moveTo(0, 10);
+        ctx.lineTo(0, 50);
+        ctx.stroke();
+      }
+      ctx.restore();
 
-      ctx.fillStyle = sunColor;
-      for (let yOffset = -sunRadius; yOffset < sunRadius; yOffset++) {
-        const sliceHeight = 2;
-        const currentY = sunY + yOffset;
-        const relativeY = (yOffset + sunRadius) / (sunRadius * 2);
-        const gapSize = Math.max(1, Math.floor(relativeY * 6));
+      // Drawing Right Giant Clockwork Gear
+      ctx.save();
+      const rgX = 810 - camX * 0.04 + shakeX * 0.15;
+      const rgY = 110 - camY * 0.04 + shakeY * 0.15;
+      ctx.translate(rgX, rgY);
+      ctx.rotate(-Date.now() * 0.00015);
+      ctx.fillStyle = 'rgba(28, 3, 7, 0.5)';
+      ctx.strokeStyle = '#ec4899';
+      ctx.lineWidth = 1.2;
+      // Circle
+      ctx.beginPath();
+      ctx.arc(0, 0, 140, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      const teethCountR = 16;
+      for (let t = 0; t < teethCountR; t++) {
+        ctx.rotate(Math.PI * 2 / teethCountR);
+        ctx.fillRect(-18, -162, 36, 32);
+        ctx.strokeRect(-18, -162, 36, 32);
+      }
+      ctx.fillStyle = preset.skyTop;
+      ctx.beginPath();
+      ctx.arc(0, 0, 75, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      ctx.restore();
+
+      // --- STUNNING COLOSSAL TEMPORAL SINGULARITY RIFT ---
+      const rx = 480 - (camX - 320) * 0.12 + shakeX * 0.4;
+      const ry = 180 - camY * 0.04 + shakeY * 0.4;
+
+      // 1. Black outer event horizon glow
+      ctx.save();
+      const outerGlow = ctx.createRadialGradient(rx, ry, 10, rx, ry, 210);
+      outerGlow.addColorStop(0, 'rgba(244, 63, 94, 0.45)'); // Hot crimson
+      outerGlow.addColorStop(0.35, 'rgba(236, 72, 153, 0.2)'); // Pink halo
+      outerGlow.addColorStop(0.7, 'rgba(34, 211, 238, 0.08)'); // Cyan edge
+      outerGlow.addColorStop(1, 'rgba(0, 0, 0, 0)');
+      ctx.fillStyle = outerGlow;
+      ctx.beginPath();
+      ctx.arc(rx, ry, 210, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+
+      // 2. Concentric Chronos Alignment HUD Gauges (glowing spinning indicators)
+      // Pink Outer Gauge Ring
+      ctx.save();
+      ctx.strokeStyle = '#ec4899';
+      ctx.lineWidth = 2.5;
+      ctx.shadowColor = '#ec4899';
+      ctx.shadowBlur = 12;
+      ctx.translate(rx, ry);
+      ctx.rotate(-Date.now() * 0.0006);
+      ctx.beginPath();
+      ctx.arc(0, 0, 150, 0, Math.PI * 1.4);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(0, 0, 150, Math.PI * 1.5, Math.PI * 1.85);
+      ctx.stroke();
+      ctx.restore();
+
+      // Cyan Mid Gauge Ring with ticks
+      ctx.save();
+      ctx.strokeStyle = '#22d3ee';
+      ctx.lineWidth = 1.5;
+      ctx.shadowColor = '#22d3ee';
+      ctx.shadowBlur = 8;
+      ctx.translate(rx, ry);
+      ctx.rotate(Date.now() * 0.001);
+      ctx.setLineDash([4, 18]);
+      ctx.beginPath();
+      ctx.arc(0, 0, 120, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+
+      // Gold Inner Ring with Chrono glyph block divisions
+      ctx.save();
+      ctx.strokeStyle = '#eab308';
+      ctx.lineWidth = 3.5;
+      ctx.shadowColor = '#eab308';
+      ctx.shadowBlur = 15;
+      ctx.translate(rx, ry);
+      ctx.rotate(-Date.now() * 0.0018);
+      ctx.setLineDash([40, 25, 10, 25]);
+      ctx.beginPath();
+      ctx.arc(0, 0, 95, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+
+      // 3. Temporal electrical arcs shooting out (zigzag procedural sparks)
+      ctx.save();
+      ctx.strokeStyle = Math.random() < 0.5 ? '#22d3ee' : '#ec4899';
+      ctx.shadowColor = ctx.strokeStyle;
+      ctx.shadowBlur = 12;
+      ctx.lineWidth = 1.5;
+      for (let arc = 0; arc < 2; arc++) {
+        const targetAngle = hash(Date.now() * 0.01 + arc) * Math.PI * 2;
+        const totalSegs = 7;
+        const maxArcLength = 70 + hash(Date.now() * 0.04) * 90;
         
-        if (Math.abs(yOffset) % (sliceHeight + gapSize) <= sliceHeight) {
-          const widthAtY = Math.sqrt(sunRadius * sunRadius - yOffset * yOffset);
-          ctx.fillRect(sunX - widthAtY, currentY, widthAtY * 2, 2.5);
+        ctx.beginPath();
+        let curX = rx + Math.cos(targetAngle) * 55;
+        let curY = ry + Math.sin(targetAngle) * 55;
+        ctx.moveTo(curX, curY);
+        
+        for (let s = 1; s <= totalSegs; s++) {
+          const progress = s / totalSegs;
+          const nominalDist = 55 + progress * maxArcLength;
+          const wobble = (hash(Date.now() * 0.12 + s + arc) - 0.5) * 28;
+          
+          const segX = rx + Math.cos(targetAngle) * nominalDist + Math.cos(targetAngle + Math.PI/2) * wobble;
+          const segY = ry + Math.sin(targetAngle) * nominalDist + Math.sin(targetAngle + Math.PI/2) * wobble;
+          
+          ctx.lineTo(segX, segY);
+        }
+        ctx.stroke();
+      }
+      ctx.restore();
+
+      // 4. Absolute Center Abyss Void (Drains light!)
+      ctx.save();
+      ctx.fillStyle = '#020005';
+      ctx.shadowColor = '#f43f5e';
+      ctx.shadowBlur = 20;
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.arc(rx, ry, 55, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      ctx.restore();
+    } else {
+      // Draw Celestial Orb (Sun/Moon/Eclipse)
+      ctx.save();
+      const sunX = 700 - camX * 0.015 + shakeX * 0.1;
+      const sunY = 140 - camY * 0.015 + shakeY * 0.1;
+
+      if (preset.isEclipse) {
+        // Draw massive eclipsed dark sun with blazing crimson flares
+        const moonRadius = 75;
+        const sunGlow = ctx.createRadialGradient(sunX, sunY, 10, sunX, sunY, moonRadius * 2.2);
+        sunGlow.addColorStop(0, preset.sunGlow);
+        sunGlow.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.fillStyle = sunGlow;
+        ctx.beginPath();
+        ctx.arc(sunX, sunY, moonRadius * 2.2, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.fillStyle = preset.sunColor;
+        ctx.beginPath();
+        ctx.arc(sunX, sunY, moonRadius, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.fillStyle = preset.skyTop;
+        ctx.beginPath();
+        ctx.arc(sunX - 15, sunY - 10, moonRadius - 5, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.strokeStyle = 'rgba(239, 68, 68, 0.25)';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.arc(sunX, sunY, moonRadius * 1.5, 0, Math.PI * 2);
+        ctx.stroke();
+      } else {
+        // Draw split-line digital sun
+        const sunRadius = 65;
+        const sunGlow = ctx.createRadialGradient(sunX, sunY, 10, sunX, sunY, sunRadius * 2);
+        sunGlow.addColorStop(0, preset.sunGlow);
+        sunGlow.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.fillStyle = sunGlow;
+        ctx.beginPath();
+        ctx.arc(sunX, sunY, sunRadius * 2, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.fillStyle = preset.sunColor;
+        for (let yOffset = -sunRadius; yOffset < sunRadius; yOffset++) {
+          const sliceHeight = 2;
+          const currentY = sunY + yOffset;
+          const relativeY = (yOffset + sunRadius) / (sunRadius * 2);
+          const gapSize = Math.max(1, Math.floor(relativeY * 6));
+          
+          if (Math.abs(yOffset) % (sliceHeight + gapSize) <= sliceHeight) {
+            const widthAtY = Math.sqrt(sunRadius * sunRadius - yOffset * yOffset);
+            ctx.fillRect(sunX - widthAtY, currentY, widthAtY * 2, 2.5);
+          }
         }
       }
+      ctx.restore();
     }
-    ctx.restore();
 
+    // Ambient stars background
     ctx.save();
-    ctx.fillStyle = 'rgba(255, 255, 255, 0.65)';
+    ctx.fillStyle = activeTheme === 'monochrome_cyber' ? 'rgba(255, 255, 255, 0.45)' : 'rgba(255, 255, 255, 0.65)';
     for (let s = 0; s < 50; s++) {
       const starX = (hash(s * 15.3 + levelIndex) * 960 - camX * 0.02 + shakeX * 0.1 + 1920) % 960;
       const starY = hash(s * 27.9 + levelIndex) * 280;
@@ -2835,12 +3592,13 @@ export default function App() {
     }
     ctx.restore();
 
+    // Distant Far structures
     drawSkyscraperLayer(ctx, {
       parallaxFactor: 0.08,
       buildingWidth: 65,
       minHeight: 220,
       maxHeight: 380,
-      color: levelIndex === 4 ? '#220b0c' : (levelIndex === 1 ? '#180726' : (levelIndex === 3 ? '#10131d' : '#140c21')),
+      color: preset.bgLayer1,
       lineColor: 'rgba(255, 255, 255, 0.05)',
       camX,
       camY,
@@ -2848,16 +3606,17 @@ export default function App() {
       shakeY: shakeY * 0.25,
       seedOffset: levelIndex * 20,
       drawWindows: true,
-      windowColor: levelIndex === 4 ? 'rgba(239, 68, 68, 0.15)' : 'rgba(34, 211, 238, 0.15)',
+      windowColor: preset.windowColor1,
       drawAntennas: true
     });
 
+    // Medium distant structures
     drawSkyscraperLayer(ctx, {
       parallaxFactor: 0.25,
       buildingWidth: 100,
       minHeight: 140,
       maxHeight: 290,
-      color: levelIndex === 4 ? '#330e10' : (levelIndex === 1 ? '#27113e' : (levelIndex === 3 ? '#141b2c' : '#1f1334')),
+      color: preset.bgLayer2,
       lineColor: 'rgba(255, 255, 255, 0.08)',
       camX,
       camY,
@@ -2865,19 +3624,21 @@ export default function App() {
       shakeY: shakeY * 0.5,
       seedOffset: levelIndex * 20 + 100,
       drawWindows: true,
-      windowColor: levelIndex === 4 ? 'rgba(245, 158, 11, 0.35)' : (levelIndex === 1 ? 'rgba(244, 63, 94, 0.3)' : 'rgba(52, 211, 153, 0.3)'),
+      windowColor: preset.windowColor2,
       drawAntennas: true,
       drawWires: true
     });
 
+    // Draw flying vehicle streams
     drawFlyingCarTraffic(ctx, camX, camY, shakeX, shakeY, levelIndex);
 
+    // Front high-density skyline layer
     drawSkyscraperLayer(ctx, {
       parallaxFactor: 0.48,
       buildingWidth: 160,
       minHeight: 110,
       maxHeight: 240,
-      color: levelIndex === 4 ? '#180406' : (levelIndex === 1 ? '#120a1c' : (levelIndex === 3 ? '#0a0e1a' : '#0e0918')),
+      color: preset.bgLayer3,
       lineColor: 'rgba(255, 255, 255, 0.12)',
       camX,
       camY,
@@ -2885,15 +3646,16 @@ export default function App() {
       shakeY: shakeY * 0.85,
       seedOffset: levelIndex * 20 + 200,
       drawWindows: true,
-      windowColor: levelIndex === 4 ? 'rgba(239, 68, 68, 0.45)' : (levelIndex === 1 ? 'rgba(244, 63, 94, 0.45)' : 'rgba(6, 182, 212, 0.45)'),
+      windowColor: preset.windowColor3,
       drawAntennas: false,
       drawAds: true,
       drawWires: true
     });
 
-    if (levelIndex === 3) {
+    // Specific rain/ember animation layers
+    if (activeTheme === 'cyber_neon' && levelIndex === 3) {
       drawRainWeatherLayer(ctx);
-    } else if (levelIndex === 4) {
+    } else if (activeTheme === 'industrial_crimson' || activeTheme === 'amber_sunset') {
       drawEmberWeatherLayer(ctx);
     } else {
       drawAmbientDustWeatherLayer(ctx);
@@ -2902,8 +3664,19 @@ export default function App() {
 
   // GRAPHICS DRAWING LOGIC COMPONENT SHAPES HELPERS
   function drawCyberGridLines(ctx: CanvasRenderingContext2D, waveWidth: number, waveHeight: number) {
+    const activeTheme = activeLevel.theme || 'cyber_neon';
+    let presetTheme = activeTheme;
+    if (settings.visualTheme === 'matrix_green') {
+      presetTheme = 'matrix_green';
+    } else if (settings.visualTheme === 'monochrome') {
+      presetTheme = 'monochrome_cyber';
+    } else if (settings.visualTheme === 'retro_arcade') {
+      presetTheme = 'vaporwave';
+    }
+    const preset = THEME_PRESETS[presetTheme] || THEME_PRESETS.cyber_neon;
+
     ctx.save();
-    ctx.strokeStyle = 'rgba(110, 231, 183, 0.04)'; // faint matrix cyan-green lines
+    ctx.strokeStyle = preset.gridLineColor;
     ctx.lineWidth = 1;
     const size = 60;
     
@@ -3529,6 +4302,64 @@ export default function App() {
       ctx.fillRect(2.8, -5, 1, 7);
       ctx.restore();
 
+    } else if (enemy.type === 'boss') {
+      // --- MONUMENTAL CHRONOS MECH CORES ---
+      // Outer black/crimson heavy carapace shell
+      ctx.fillStyle = '#0f172a'; // main heavy slate metal plating
+      ctx.fillRect(8, 22 + bobY, 54, 46);
+      
+      // Secondary pink highlights
+      ctx.fillStyle = '#ec4899';
+      ctx.fillRect(14, 28 + bobY, 42, 6);
+      ctx.fillRect(18, 44 + bobY, 34, 4);
+      
+      // Central glowing sphere reactor core
+      const corePulse = 0.6 + Math.sin(tick * 0.12) * 0.4;
+      ctx.fillStyle = `rgba(34, 211, 238, ${corePulse})`;
+      ctx.shadowColor = '#22d3ee';
+      ctx.shadowBlur = 12;
+      ctx.beginPath();
+      ctx.arc(35, 40 + bobY, 12, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.shadowBlur = 0; // reset
+      
+      // Golden reactor safety containment rings
+      ctx.strokeStyle = '#eab308';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(21, 26 + bobY, 28, 28);
+      
+      // Heavy hydraulic joint boots
+      ctx.fillStyle = '#020617';
+      ctx.fillRect(14 + leftLegOffset * 0.3, 68 + bobY, 14, 18);
+      ctx.fillRect(42 + rightLegOffset * 0.3, 68 + bobY, 14, 18);
+      
+      // Golden micro hydraulic plates on shoes
+      ctx.fillStyle = '#eab308';
+      ctx.fillRect(10 + leftLegOffset * 0.3, 82 + bobY, 18, 4);
+      ctx.fillRect(42 + rightLegOffset * 0.3, 82 + bobY, 18, 4);
+
+      // Heavy head turret pod with double shining visor sensors
+      ctx.fillStyle = '#1e1b4b';
+      ctx.fillRect(18, 4 + bobY, 34, 18);
+      ctx.fillStyle = '#ef4444'; // Red targeting scanning eye
+      ctx.fillRect(25, 10 + bobY, 20, 3);
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(32 + Math.floor((tick % 20) / 4) * 2, 10 + bobY, 4, 3);
+
+      // Left massive gunpod attachment (Gatling Laser cannon)
+      ctx.fillStyle = '#334155';
+      ctx.fillRect(width - 15, 34 + bobY, 35, 12);
+      ctx.fillStyle = '#e2e8f0'; // Three barrels of gatling cluster
+      ctx.fillRect(width + 10, 34 + bobY, 18, 3);
+      ctx.fillRect(width + 10, 38.5 + bobY, 18, 3);
+      ctx.fillRect(width + 10, 43 + bobY, 18, 3);
+      
+      // Right heavy shoulder plate wing (VHF Active Shield unit)
+      ctx.fillStyle = '#1e293b';
+      ctx.fillRect(-15, 18 + bobY, 22, 28);
+      ctx.fillStyle = '#22d3ee'; // Cyber glowing shield emitters
+      ctx.fillRect(-10, 22 + bobY, 3, 18);
+
     } else {
       // --- STANDARD SECURITY CORPS (GUNNER) ---
       ctx.fillStyle = '#334155'; // gunmetal plating
@@ -3669,6 +4500,163 @@ export default function App() {
     }
     
     ctx.restore();
+  }
+
+  function drawBossHUD(ctx: CanvasRenderingContext2D, state: any) {
+    const boss = state.enemies.find((e: any) => e.type === 'boss');
+    if (!boss) return;
+
+    if (boss.health > 0) {
+      if (boss.noticeTimer > 0) {
+        // --- DRAW INTRO CINEMATIC CARD OVERLAY ---
+        ctx.save();
+        
+        // Letterbox bars
+        ctx.fillStyle = '#020205';
+        ctx.fillRect(0, 0, 960, 48); // Top bar
+        ctx.fillRect(0, 492, 960, 48); // Bottom bar
+        
+        // Center card overlay
+        ctx.fillStyle = 'rgba(10, 5, 20, 0.85)';
+        ctx.strokeStyle = '#f43f5e';
+        ctx.lineWidth = 1.5;
+        
+        const widthBox = 560;
+        const heightBox = 160;
+        const boxX = 480 - widthBox / 2;
+        const boxY = 270 - heightBox / 2;
+        
+        ctx.fillRect(boxX, boxY, widthBox, heightBox);
+        ctx.strokeRect(boxX, boxY, widthBox, heightBox);
+        
+        // Glowing alert stripes background
+        ctx.fillStyle = 'rgba(244, 63, 94, 0.08)';
+        for (let sX = boxX + 15; sX < boxX + widthBox - 15; sX += 30) {
+          ctx.beginPath();
+          ctx.moveTo(sX, boxY + 10);
+          ctx.lineTo(sX + 15, boxY + 10);
+          ctx.lineTo(sX + 30, boxY + heightBox - 10);
+          ctx.lineTo(sX + 15, boxY + heightBox - 10);
+          ctx.closePath();
+          ctx.fill();
+        }
+        
+        ctx.shadowBlur = 12;
+        ctx.textAlign = 'center';
+        
+        // Line 1: Warn banner
+        ctx.shadowColor = '#f43f5e';
+        ctx.font = 'bold 11px monospace';
+        ctx.fillStyle = '#f43f5e';
+        ctx.fillText("⚠️ WARNING: CHRONOS TIME ANOMALY DETECTED ⚠️", 480, boxY + 36);
+        
+        // Line 2: Heavy title
+        ctx.shadowColor = '#38bdf8';
+        ctx.font = '900 22px sans-serif';
+        ctx.fillStyle = '#f1f5f9';
+        ctx.fillText("PROJECT CHRONOS: MECH-DEMON", 480, boxY + 76);
+        
+        // Line 3: Description name
+        ctx.shadowColor = '#d946ef';
+        ctx.font = 'normal 13px monospace';
+        ctx.fillStyle = '#cbd5e1';
+        ctx.fillText("时空毁灭者 · 最终裁决者「 克罗诺斯 」", 480, boxY + 110);
+        
+        // Flashing footer line
+        if (Math.floor(Date.now() / 250) % 2 === 0) {
+          ctx.fillStyle = '#f43f5e';
+          ctx.beginPath();
+          ctx.arc(480, boxY + 130, 4, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.font = 'bold 9px monospace';
+          ctx.fillText("INITIATING TIME-REVERSAL GRID ANNIHILATION", 480, boxY + 145);
+        }
+        
+        // Skip entry hint inside bottom letterbox bar
+        ctx.save();
+        ctx.font = 'normal 9px monospace';
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.45)';
+        ctx.textAlign = 'center';
+        ctx.fillText("— PRESS J, SPACE, OR LEFT-CLICK TO INSTANTLY START BATTLE —", 480, 515);
+        ctx.restore();
+
+        ctx.restore();
+      } else {
+        // --- DRAW ACTIVE BOSS STATUS LIFEBAR ---
+        ctx.save();
+        
+        // Indicator text (bilingual detail)
+        ctx.shadowColor = '#f43f5e';
+        ctx.shadowBlur = 5;
+        ctx.font = 'bold 11px sans-serif';
+        ctx.fillStyle = '#f1f5f9';
+        ctx.textAlign = 'left';
+        ctx.fillText("🤖 CHRONOS PEAK MECH (时空主控级机甲：克罗诺斯)", 160, 42);
+        
+        let bossModeText = "ACTIVE (就绪)";
+        if (boss.bossState === 'attack_gatling') {
+          bossModeText = "🔥 CHRONO-GATLING BARRAGE (连发：时空脉冲扫射)";
+        } else if (boss.bossState === 'attack_burst') {
+          bossModeText = "💠 SINGULARITY VOID BURST (爆发：奇点星爆弹幕)";
+        } else if (boss.bossState === 'attack_sweep_laser') {
+          bossModeText = "⚡ THERMOBARIC PLASMA BEAM (毁灭：热压扫描激光)";
+        } else if (boss.bossState === 'reposition') {
+          bossModeText = "💨 WARP DRIFT POSITIONING (时空折叠：高速位移)";
+        }
+        ctx.font = 'bold 10px monospace';
+        ctx.fillStyle = '#ef4444';
+        ctx.textAlign = 'right';
+        ctx.fillText(bossModeText, 800, 42);
+        
+        // Outer lifebar panel base
+        ctx.fillStyle = '#0f172a';
+        ctx.fillRect(160, 48, 640, 14);
+        
+        // Glowing life energy
+        const healthPct = boss.health / boss.maxHealth;
+        const barWidth = 640 * healthPct;
+        
+        const barGrad = ctx.createLinearGradient(160, 0, 800, 0);
+        barGrad.addColorStop(0, '#ef4444');
+        barGrad.addColorStop(1, '#ec4899');
+        ctx.fillStyle = barGrad;
+        ctx.shadowColor = '#ef4444';
+        ctx.shadowBlur = 10;
+        ctx.fillRect(160, 48, barWidth, 14);
+        
+        // High fidelity segment lines
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
+        ctx.lineWidth = 1;
+        for (let gx = 160 + 40; gx < 160 + barWidth; gx += 40) {
+          ctx.beginPath();
+          ctx.moveTo(gx, 48);
+          ctx.lineTo(gx - 4, 62);
+          ctx.stroke();
+        }
+        
+        // Panel trim box line decoration
+        ctx.strokeStyle = '#38bdf8';
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(160, 48, 640, 14);
+        
+        ctx.restore();
+      }
+    } else {
+      // Boss is vanquished!
+      if (state.levelClearedCountdown !== undefined && state.levelClearedCountdown > 0) {
+        ctx.save();
+        ctx.textAlign = 'center';
+        ctx.shadowColor = '#10b981';
+        ctx.shadowBlur = 15;
+        ctx.fillStyle = '#ffffff';
+        ctx.font = 'bold 20px sans-serif';
+        ctx.fillText("⚔️ CHRONOS SINGULARITY DESTROYED (时空奇点已彻底摧毁) ⚔️", 480, 120);
+        ctx.font = 'bold 12px monospace';
+        ctx.fillStyle = '#34d399';
+        ctx.fillText("TIMELINE RESTORED · TIME-REVERSAL SAMURAI VICTORY SUCCESS", 480, 150);
+        ctx.restore();
+      }
+    }
   }
 
   function drawVhsRecordingOverlay(ctx: CanvasRenderingContext2D, slowMoEnergy: number, slowMoActive: boolean, isRewinding: boolean) {
@@ -4085,6 +5073,30 @@ export default function App() {
                       levelChinese = "时隙奇点 / 时空尽头";
                       difficultyBadge = "终焉 / ETERNITY";
                       diffColor = "bg-amber-500/10 text-amber-400 border-amber-500/30";
+                    } else if (idx === 10) {
+                      levelChinese = "双子风道 / 双华逆旋";
+                      difficultyBadge = "修罗 / ASURA";
+                      diffColor = "bg-pink-500/10 text-pink-400 border-pink-500/30";
+                    } else if (idx === 11) {
+                      levelChinese = "核能反应堆 / 奇点熔毁";
+                      difficultyBadge = "炼狱 / PURGATORY";
+                      diffColor = "bg-rose-500/10 text-rose-400 border-rose-500/30";
+                    } else if (idx === 12) {
+                      levelChinese = "雷达据点 / 脉冲扫描";
+                      difficultyBadge = "灾厄 / CALAMITY";
+                      diffColor = "bg-red-500/10 text-red-400 border-red-500/30";
+                    } else if (idx === 13) {
+                      levelChinese = "时空回廊 / 虚空破碎";
+                      difficultyBadge = "幻灭 / APOCALYPSE";
+                      diffColor = "bg-violet-500/10 text-violet-400 border-violet-500/30";
+                    } else if (idx === 14) {
+                      levelChinese = "赛博终极奇点 / 决战前夕";
+                      difficultyBadge = "主宰 / OVERLORD";
+                      diffColor = "bg-orange-500/10 text-orange-400 border-orange-500/30";
+                    } else if (idx === 15) {
+                      levelChinese = "终极时空裂缝 / 克罗诺斯 🛡️";
+                      difficultyBadge = "终局 BOSS / SHOWDOWN";
+                      diffColor = "bg-red-600/20 text-red-500 border-red-650/40 font-bold animate-pulse";
                     }
 
                     return (
@@ -4340,24 +5352,74 @@ export default function App() {
                 />
               </div>
 
-              {/* Master Volume */}
-              <div>
-                <div className="flex justify-between text-sm font-semibold text-slate-200">
-                  <span className="flex items-center gap-1.5">
-                    <Volume2 className="w-4 h-4 text-cyan-400" /> MASTER SOUND LEVEL
-                  </span>
-                  <span className="text-cyan-400">{Math.round(settings.soundVolume * 100)}%</span>
+              {/* Master Volume & BGM Music Mode */}
+              <div className="space-y-4">
+                <div>
+                  <div className="flex justify-between text-sm font-semibold text-slate-200">
+                    <span className="flex items-center gap-1.5">
+                      <Volume2 className="w-4 h-4 text-cyan-400" /> MASTER SOUND LEVEL
+                    </span>
+                    <span className="text-cyan-400">{Math.round(settings.soundVolume * 100)}%</span>
+                  </div>
+                  <input
+                    id="settings-volume"
+                    type="range"
+                    min="0"
+                    max="1"
+                    step="0.05"
+                    value={settings.soundVolume}
+                    onChange={(e) => setSettings({ ...settings, soundVolume: Number(e.target.value) })}
+                    className="w-full h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer mt-2"
+                  />
                 </div>
-                <input
-                  id="settings-volume"
-                  type="range"
-                  min="0"
-                  max="1"
-                  step="0.05"
-                  value={settings.soundVolume}
-                  onChange={(e) => setSettings({ ...settings, soundVolume: Number(e.target.value) })}
-                  className="w-full h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer mt-2"
-                />
+
+                <div className="border border-slate-800 rounded-xl p-3 bg-slate-950/50 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-semibold text-slate-300 font-sans tracking-wide uppercase">
+                      🎧 BACKGROUND MUSIC MODE (背景音乐)
+                    </span>
+                    <button
+                      id="btn-toggle-bgm"
+                      onClick={() => setSettings({ ...settings, useCustomBgm: !settings.useCustomBgm })}
+                      className={`text-xs font-mono font-bold px-3 py-1.5 rounded-lg border transition ${settings.useCustomBgm ? 'bg-purple-600 text-white border-purple-400' : 'bg-cyan-500 text-slate-950 border-cyan-300'}`}
+                    >
+                      {settings.useCustomBgm ? 'CUSTOM (自定义音频)' : 'PROCEDURAL SYNTH (合成器)'}
+                    </button>
+                  </div>
+
+                  {settings.useCustomBgm && (
+                    <div className="space-y-2 mt-2">
+                      <span className="text-[11px] text-slate-400 block font-sans leading-relaxed">
+                        💡 <strong>如何替换</strong>: 直接拖拽你的 <code>.mp3/.wav</code> 文件至左侧侧边栏文件树的 <code>public</code> 文件夹中（重命名为 <code>vaporwave1.mp3</code> 或 <code>vaporwave2.mp3</code>），然后在下方指定对应路径。
+                      </span>
+                      
+                      <div className="flex gap-1.5 pt-1">
+                        {['/vaporwave1.mp3', '/vaporwave2.mp3', '/bgm.mp3'].map((presetPath) => (
+                          <button
+                            id={`btn-bgm-preset-${presetPath.replace('/', '')}`}
+                            key={presetPath}
+                            onClick={() => setSettings({ ...settings, customBgmPath: presetPath })}
+                            className={`text-[10px] font-mono px-2 py-1 rounded border transition ${settings.customBgmPath === presetPath ? 'bg-purple-500 text-white border-white' : 'bg-slate-900 border-slate-800 text-slate-400 hover:bg-slate-800'}`}
+                          >
+                            {presetPath}
+                          </button>
+                        ))}
+                      </div>
+
+                      <div className="flex items-center gap-1.5 mt-2">
+                        <span className="text-[10px] text-slate-400 font-mono">FILE PATH:</span>
+                        <input
+                          id="settings-bgm-path"
+                          type="text"
+                          value={settings.customBgmPath}
+                          onChange={(e) => setSettings({ ...settings, customBgmPath: e.target.value })}
+                          placeholder="/vaporwave1.mp3"
+                          className="flex-1 bg-slate-900 border border-slate-800 text-slate-200 rounded px-2.5 py-1 text-xs font-mono focus:outline-none focus:border-purple-500"
+                        />
+                      </div>
+                    </div>
+                  )}
+                </div>
               </div>
 
               {/* Choose Screen filter theme */}

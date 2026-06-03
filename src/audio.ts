@@ -13,6 +13,9 @@ class AudioSynthEngine {
   private currentBeats: number = 0;
   private isSlowMo: boolean = false;
   private distortionCurve: Float32Array | null = null;
+  private customBgm1: HTMLAudioElement | null = null;
+  private isUsingCustomBgm: boolean = false;
+  private customBgmPath: string = '/vaporwave1.mp3';
 
   constructor() {
     // Initialized lazily to comply with browser standards (user interaction required)
@@ -56,6 +59,9 @@ class AudioSynthEngine {
     this.volume = Math.max(0, Math.min(1, vol));
     if (this.masterGain) {
       this.masterGain.gain.setValueAtTime(this.volume, this.ctx?.currentTime || 0);
+    }
+    if (this.customBgm1) {
+      this.customBgm1.volume = this.volume;
     }
   }
 
@@ -448,12 +454,58 @@ class AudioSynthEngine {
     osc.stop(now + 0.1);
   }
 
+  setCustomBGM(useCustom: boolean, path: string = '/vaporwave1.mp3') {
+    this.isUsingCustomBgm = useCustom;
+    this.customBgmPath = path;
+    
+    if (this.customBgm1) {
+      try {
+        this.customBgm1.pause();
+      } catch (e) {}
+      this.customBgm1 = null;
+    }
+    
+    if (this.isBgmPlaying) {
+      if (this.bgmTimeoutId) {
+        clearTimeout(this.bgmTimeoutId);
+        this.bgmTimeoutId = null;
+      }
+      if (useCustom) {
+        this.playCustomBgmTrack();
+      } else {
+        this.playBgmStep();
+      }
+    }
+  }
+
+  private playCustomBgmTrack() {
+    if (!this.isBgmPlaying || !this.isUsingCustomBgm) return;
+    try {
+      this.customBgm1 = new Audio(this.customBgmPath);
+      this.customBgm1.loop = true;
+      this.customBgm1.volume = this.volume;
+      this.customBgm1.play().catch(e => {
+        console.warn("Could not play custom BGM file. Falling back to Procedural Synth BGM.", e);
+        this.isUsingCustomBgm = false;
+        this.playBgmStep();
+      });
+    } catch (e) {
+      console.warn("Failed to load / play HTML5 Audio", e);
+      this.isUsingCustomBgm = false;
+      this.playBgmStep();
+    }
+  }
+
   startBGM() {
     this.init();
     if (this.isBgmPlaying) return;
     this.isBgmPlaying = true;
     this.currentBeats = 0;
-    this.playBgmStep();
+    if (this.isUsingCustomBgm) {
+      this.playCustomBgmTrack();
+    } else {
+      this.playBgmStep();
+    }
   }
 
   stopBGM() {
@@ -461,6 +513,12 @@ class AudioSynthEngine {
     if (this.bgmTimeoutId) {
       clearTimeout(this.bgmTimeoutId);
       this.bgmTimeoutId = null;
+    }
+    if (this.customBgm1) {
+      try {
+        this.customBgm1.pause();
+      } catch (e) {}
+      this.customBgm1 = null;
     }
   }
 

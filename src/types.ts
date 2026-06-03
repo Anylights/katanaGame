@@ -45,12 +45,14 @@ export interface PlayerState {
   lastDeathTick: number;
   isRewinding: boolean;
   doubleJumpsLeft: number;
+  slashedEnemyIds?: Record<string, boolean>;
+  isBulletTimeLocked?: boolean;
   scarfPoints?: { x: number; y: number; vx: number; vy: number }[];
   lastLandTick?: number;
   lastJumpTick?: number;
 }
 
-export type EnemyType = 'grunt' | 'gunner' | 'shield' | 'sniper' | 'shotgunner';
+export type EnemyType = 'grunt' | 'gunner' | 'shield' | 'sniper' | 'shotgunner' | 'boss';
 
 export interface EnemyState {
   id: string;
@@ -124,6 +126,7 @@ export interface LevelConfig {
   platforms: Platform[];
   enemies: Array<{ type: EnemyType; x: number; y: number; patrolRange?: number }>;
   completed: boolean;
+  theme?: 'cyber_neon' | 'vaporwave' | 'matrix_green' | 'amber_sunset' | 'industrial_crimson' | 'monochrome_cyber';
 }
 
 export interface Platform {
@@ -144,6 +147,8 @@ export interface GameSettings {
   infiniteBulletTime: boolean;
   soundVolume: number; // 0 to 1
   visualTheme: 'neon_noir' | 'retro_arcade' | 'matrix_green' | 'monochrome';
+  useCustomBgm: boolean;
+  customBgmPath: string;
 }
 
 export interface GameHistoryFrame {
